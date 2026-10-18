@@ -21,7 +21,9 @@ Exit condition: the commands in `COLLABORATION.md` run green on a clean checkout
 - [x] Get `pytest tests/qa` green, or record each remaining failure as a real defect (83 passed, 2026-10-18)
 - [x] Add `.github/workflows/fork-gate.yml` (Python gate plus the QA workbench suite) and disable the inherited upstream suite
 - [x] Confirm the gate runs green on `main` (2026-10-18, runs 39128233554 and 39128813135)
-- [ ] Stabilize the full WebUI suite, which is flaky on chat-UI tests, then gate it
+- [x] Pin the runner to `ubuntu-24.04` and apply the same documentation-only filter to push and pull request
+- [x] Add `scripts/hooks/pre-push` so the gate runs locally before a push
+- [ ] Fix the five WebUI failures in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx` with a boot-aware readiness helper, then gate the full suite
 
 ## M2 - Documentation truth pass
 

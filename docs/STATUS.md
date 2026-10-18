@@ -22,7 +22,7 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 | QA tests | `.venv/bin/python -m pytest tests/qa -q` | 83 passed in 8.59s (2026-10-18) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
-| Full WebUI suite | `cd webui && npm test` | 2792 passed, 5 failed; flaky, see Known gaps |
+| Full WebUI suite | `cd webui && npm test` | 2792 passed, 5 failed; known, see Known gaps |
 | Full suite | `.venv/bin/python -m pytest -q` | never run on this host |
 
 `pytest-asyncio` and `ruff` were missing from `.venv` and were installed on 2026-10-18. Before that, 26 async tests failed with `async def functions are not natively supported` and `ruff` did not exist. Both were missing dev dependencies, not product defects. A new checkout needs them before the gate means anything.
@@ -38,8 +38,11 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 
 ## Known gaps
 
-- CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
-- The full WebUI suite is flaky: two consecutive runs on 2026-10-18 produced 5 and 6 failures in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx`, both unrelated to QA. It is not part of the gate until it is stabilized.
+- CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests, with the same documentation-only filter on both events: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite, both on `ubuntu-24.04`. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
+- The full WebUI suite has five failures unrelated to QA and is therefore not gated. They are not timing flakes: raising Testing Library's `asyncUtilTimeout` from 1s to 5s changed nothing, and `app-layout.test.tsx -t "opens a blank start page without creating an empty chat"` fails three times out of three in isolation.
+- Failure mode: `App.tsx` renders `StartupShell` while `state.status === "loading"`, and that state clears only after `fetchBootstrap` resolves. Tests that assert right after `waitFor(() => expect(connectSpy).toHaveBeenCalled())` therefore query a UI that is still the startup shell. A `DEBUG_PRINT_LIMIT=200000` run at failure time shows `<section aria-busy="true" class="startup-shell">` with `Connecting to nanobot...`.
+- Reproduce: `cd webui && DEBUG_PRINT_LIMIT=200000 npx vitest run src/tests/app-layout.test.tsx -t "opens a blank start page without creating an empty chat"`.
+- Fix direction: a readiness helper that waits for boot to finish (header or hero present) instead of waiting for the connect call, applied to the affected tests in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx`.
 - WebUI tests have never run on this host, so their state is unknown rather than green.
 - `nanobot/web/dist` and `.venv` are not tracked by git; a fresh clone is not a working deployment until both are rebuilt (see `deploy.md`).
 - There is no history before 2026-10-18: the tree was deployed as a tarball and captured as a single baseline commit.
