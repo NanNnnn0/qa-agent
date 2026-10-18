@@ -21,7 +21,8 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 |---|---|---|
 | QA tests | `.venv/bin/python -m pytest tests/qa -q` | 83 passed in 8.59s (2026-10-18) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
-| WebUI tests | `cd webui && npm test` | never run on this host |
+| QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
+| Full WebUI suite | `cd webui && npm test` | 2792 passed, 5 failed; flaky, see Known gaps |
 | Full suite | `.venv/bin/python -m pytest -q` | never run on this host |
 
 `pytest-asyncio` and `ruff` were missing from `.venv` and were installed on 2026-10-18. Before that, 26 async tests failed with `async def functions are not natively supported` and `ruff` did not exist. Both were missing dev dependencies, not product defects. A new checkout needs them before the gate means anything.
@@ -37,7 +38,8 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 
 ## Known gaps
 
-- No CI on this fork's remote yet. `.github/workflows/ci.yml` is inherited from upstream and has never run against this tree.
+- CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
+- The full WebUI suite is flaky: two consecutive runs on 2026-10-18 produced 5 and 6 failures in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx`, both unrelated to QA. It is not part of the gate until it is stabilized.
 - WebUI tests have never run on this host, so their state is unknown rather than green.
 - `nanobot/web/dist` and `.venv` are not tracked by git; a fresh clone is not a working deployment until both are rebuilt (see `deploy.md`).
 - There is no history before 2026-10-18: the tree was deployed as a tarball and captured as a single baseline commit.

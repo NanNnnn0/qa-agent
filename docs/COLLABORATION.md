@@ -72,6 +72,8 @@ cd webui && npm test                            # when webui/ changed
 
 A red gate blocks the merge. Environment failures are recorded as `blocked_by_env`, never reported as product defects. Do not merge on "it passed earlier" without the reasoning in `.agent/workflow.md`.
 
+CI runs the same commands in `.github/workflows/fork-gate.yml` on every push and pull request. Pushes to `main` are checked after the fact, so the local run before merging is still required; CI catches drift, it does not replace the pre-merge run. A documentation-only push skips CI by design.
+
 The gate needs `pytest-asyncio` and `ruff` in `.venv`; both were installed on 2026-10-18 and `tests/qa` has been green since (see `STATUS.md`). A checkout without them reports every async test as a failure, which is an environment problem, not a code problem.
 
 ## Handoff note

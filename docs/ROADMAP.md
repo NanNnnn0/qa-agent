@@ -19,8 +19,9 @@ Exit condition: the commands in `COLLABORATION.md` run green on a clean checkout
 
 - [x] Install the test tooling the gate needs into `.venv` (`pytest-asyncio`, `ruff`; optionally `pytest-cov`, `pytest-xdist`)
 - [x] Get `pytest tests/qa` green, or record each remaining failure as a real defect (83 passed, 2026-10-18)
-- [ ] Wire `.github/workflows/ci.yml` to the fork's remote and confirm it runs the same commands
-- [ ] Add `webui` tests to the gate once `npm test` is verified on this host
+- [x] Add `.github/workflows/fork-gate.yml` (Python gate plus the QA workbench suite) and disable the inherited upstream suite
+- [x] Confirm the gate runs green on `main` (2026-10-18, runs 39128233554 and 39128813135)
+- [ ] Stabilize the full WebUI suite, which is flaky on chat-UI tests, then gate it
 
 ## M2 - Documentation truth pass
 
