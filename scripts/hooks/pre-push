@@ -1,0 +1,74 @@
+#!/bin/sh
+# Local pre-push gate: the same checks CI runs, executed before the push leaves the
+# host. See docs/COLLABORATION.md. Install once per clone:
+#
+#   git config core.hooksPath scripts/hooks
+#
+# Emergency bypass, recorded in the handoff note:
+#
+#   git push --no-verify
+#
+# The hook is skipped when the push touches documentation only, mirroring the
+# paths-ignore filter in .github/workflows/fork-gate.yml.
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# Documentation-only pushes skip the gate. A new branch has no remote sha, so it
+# cannot be compared and is always checked.
+only_docs=true
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  case "$remote_ref" in
+    refs/heads/*) ;;
+    *) continue ;;
+  esac
+  case "$remote_sha" in
+    "" | *[!0]*) ;;
+    *) only_docs=false; continue ;;
+  esac
+  changed=$(git diff --name-only "$remote_sha..$local_sha" 2>/dev/null) || { only_docs=false; continue; }
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    case "$file" in
+      *.md | docs/* | .agent/*) ;;
+      *) only_docs=false ;;
+    esac
+  done <<EOF
+$changed
+EOF
+done
+
+if [ "$only_docs" = true ]; then
+  echo "pre-push: documentation only, skipping the gate"
+  exit 0
+fi
+
+# The deployment venv carries the dependencies; from a worktree there is no local
+# .venv, so fall back to the deployment checkout's interpreter.
+python_bin=""
+for candidate in "$repo_root/.venv/bin/python" /opt/qa-agent/.venv/bin/python; do
+  if [ -x "$candidate" ]; then
+    python_bin="$candidate"
+    break
+  fi
+done
+if [ -z "$python_bin" ]; then
+  python_bin=python3
+fi
+
+echo "pre-push: ruff check nanobot/qa ($python_bin)"
+if ! "$python_bin" -m ruff check nanobot/qa; then
+  echo "pre-push: lint failed. Fix it, or push with --no-verify and record why." >&2
+  exit 1
+fi
+
+echo "pre-push: pytest tests/qa"
+if ! "$python_bin" -m pytest tests/qa -q; then
+  echo "pre-push: tests failed. Fix them, or push with --no-verify and record why." >&2
+  exit 1
+fi
+
+echo "pre-push: gate passed"

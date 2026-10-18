@@ -4,18 +4,26 @@
 # images, the TUI and the WebUI across five runners, which costs minutes this fork
 # does not need per commit. Re-enable it with `gh workflow enable "Test Suite"` when
 # a change actually touches those areas.
+#
+# Runners are pinned to ubuntu-24.04 instead of ubuntu-latest: the label migrates to
+# Ubuntu 26 in October 2026, and CI that can change operating system without a commit
+# produces failures nobody can reproduce locally.
 
 name: Fork gate
 
 on:
   push:
     branches: [main]
-    paths-ignore:
+    paths-ignore: &docs-only
       - "**/*.md"
       - docs/**
       - .agent/**
   pull_request:
     branches: [main]
+    # Same filter as push, so a documentation-only pull request stays as quiet as a
+    # documentation-only push. Use workflow_dispatch to force a run anyway.
+    paths-ignore: *docs-only
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,7 +35,7 @@ permissions:
 jobs:
   python:
     name: Python gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +60,7 @@ jobs:
 
   webui:
     name: WebUI gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -68,8 +76,8 @@ jobs:
         working-directory: webui
         run: npm ci --no-audit --no-fund
 
-      # Only the QA workbench suite is gated. The full WebUI suite is flaky on
-      # unrelated chat-UI tests (see docs/STATUS.md) and would make every push red.
+      # Only the QA workbench suite is gated. The full WebUI suite has five known
+      # failures in chat-UI tests (see docs/STATUS.md) and would make every push red.
       - name: QA workbench tests
         working-directory: webui
         run: npx vitest run qa-

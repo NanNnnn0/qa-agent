@@ -72,7 +72,19 @@ cd webui && npm test                            # when webui/ changed
 
 A red gate blocks the merge. Environment failures are recorded as `blocked_by_env`, never reported as product defects. Do not merge on "it passed earlier" without the reasoning in `.agent/workflow.md`.
 
-CI runs the same commands in `.github/workflows/fork-gate.yml` on every push and pull request. Pushes to `main` are checked after the fact, so the local run before merging is still required; CI catches drift, it does not replace the pre-merge run. A documentation-only push skips CI by design.
+CI runs the same commands in `.github/workflows/fork-gate.yml` on every push and pull request. Pushes to `main` are checked after the fact, so the local run before merging is still required; CI catches drift, it does not replace the pre-merge run. A documentation-only change skips both CI and the local hook.
+
+The same gate also runs on your machine before the push leaves it, through `scripts/hooks/pre-push`. Install it once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+The hook needs no arguments and skips documentation-only pushes. For an emergency, `git push --no-verify` bypasses it, and the handoff note records why the bypass was acceptable.
+
+## Edit hygiene
+
+The tree is CRLF-dominant: 1868 of the 1935 tracked files were committed with CRLF on 2026-10-18, and `.gitattributes` pins only `*.sh` to LF. Preserve a file's existing endings when editing it. Rewriting one to LF turns a one-line change into a whole-file diff that hides the real change, and tools that match text byte-for-byte (editors, scripted replacements) silently fail on a file whose endings they guessed wrong.
 
 The gate needs `pytest-asyncio` and `ruff` in `.venv`; both were installed on 2026-10-18 and `tests/qa` has been green since (see `STATUS.md`). A checkout without them reports every async test as a failure, which is an environment problem, not a code problem.
 

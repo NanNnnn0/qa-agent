@@ -16,6 +16,7 @@ History begins on 2026-10-18, when the deployed tree was placed under version co
 - `docs/journal/`: per-session handoff notes and their template.
 - Git repository with a baseline commit of the deployed tree, pushed to the private remote `NanNnnn0/qa-agent` with a write-scoped deploy key on the host.
 - `.github/workflows/fork-gate.yml`: CI gate running `ruff check nanobot/qa`, `pytest tests/qa` and the QA workbench WebUI suite on every push and pull request. The inherited upstream `ci.yml` is disabled manually.
+- `scripts/hooks/pre-push`: the same gate run locally before a push, installed with `git config core.hooksPath scripts/hooks`. Documentation-only pushes skip it.
 
 ### Changed
 
