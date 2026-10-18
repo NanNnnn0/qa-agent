@@ -14,7 +14,7 @@ History begins on 2026-10-18, when the deployed tree was placed under version co
 - `docs/ROADMAP.md`: ordered milestones M0-M4 with exit conditions.
 - `docs/adr/`: decision records, starting with ADR 0001.
 - `docs/journal/`: per-session handoff notes and their template.
-- Git repository with a baseline commit of the deployed tree.
+- Git repository with a baseline commit of the deployed tree, pushed to the private remote `NanNnnn0/qa-agent` with a write-scoped deploy key on the host.
 
 ### Changed
 

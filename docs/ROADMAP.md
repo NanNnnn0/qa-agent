@@ -10,8 +10,8 @@ Exit condition: two sessions can work at the same time without overwriting each 
 - [x] `docs/COLLABORATION.md`: worktree, ownership, handoff and merge rules
 - [x] `docs/deploy.md`: how code reaches the running service, and how to roll back
 - [x] `docs/STATUS.md`: what actually works today
-- [ ] Private remote repository, so history survives the host
-- [ ] One rehearsal: two worktrees, two branches, one merge, one restart
+- [x] Private remote repository, so history survives the host (`NanNnnn0/qa-agent`, pushed 2026-10-18)
+- [x] One rehearsal: two worktrees, two branches, one merge, one restart (2026-10-18, `docs/m0-rehearsal` and `docs/m0-rehearsal-b`)
 
 ## M1 - Make the merge gate runnable
 
