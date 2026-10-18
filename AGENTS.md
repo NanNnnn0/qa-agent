@@ -36,6 +36,11 @@ Rules for changing the QA layer:
 | Reusing verification evidence | [`.agent/workflow.md`](.agent/workflow.md) |
 | WebUI/host compatibility | [`.agent/review-guide.md`](.agent/review-guide.md) |
 | Contribution or publication | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/releasing.md`](docs/releasing.md) |
+| Working alongside other sessions | [`docs/COLLABORATION.md`](docs/COLLABORATION.md) |
+| Current state: what works, what does not | [`docs/STATUS.md`](docs/STATUS.md) |
+| What to build next | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Deploying, restarting, or rolling back | [`docs/deploy.md`](docs/deploy.md) |
+| A decision that crosses module boundaries | [`docs/adr/`](docs/adr/) |
 
 ## Development constraints
 
