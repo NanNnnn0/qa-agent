@@ -2,6 +2,12 @@
 
 Verified on 2026-10-18 against the deployment host. This page answers "what works right now"; it is not a plan (see `ROADMAP.md`) and not a changelog (see `CHANGELOG.md`). Update it in the same commit that makes a fact here stop being true.
 
+## Version control
+
+- History lives in the private remote `NanNnnn0/qa-agent`; `main` tracks `origin/main`.
+- The host authenticates with a repository-scoped deploy key at `/root/.ssh/github-qa-agent`, registered with write access; `/root/.ssh/config` pins it to `github.com`.
+- Sessions work in `/opt/worktrees/<slug>` and merge into `/opt/qa-agent`; see `COLLABORATION.md`.
+
 ## Running service
 
 - `qa-agent.service` is `active (running)`, started 2026-10-18 12:17 UTC, about 123 MB RSS.
