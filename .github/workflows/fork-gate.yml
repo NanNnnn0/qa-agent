@@ -1,0 +1,51 @@
+# The gate defined in docs/COLLABORATION.md, run on every push and pull request.
+#
+# The inherited upstream suite (ci.yml) is disabled in this fork: it builds Docker
+# images, the TUI and the WebUI across five runners, which costs minutes this fork
+# does not need per commit. Re-enable it with `gh workflow enable "Test Suite"` when
+# a change actually touches those areas.
+
+name: Fork gate
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - docs/**
+      - .agent/**
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest pytest-asyncio ruff
+
+      - name: Lint
+        run: python -m ruff check nanobot/qa
+
+      - name: QA tests
+        run: python -m pytest tests/qa -q
