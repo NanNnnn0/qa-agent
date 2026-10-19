@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from nanobot.qa import catalog
+from nanobot.qa import catalog, execution
 from nanobot.qa.store import QaStore
 from nanobot.qa.util import utcnow_iso
 from nanobot.qa.validation import (
@@ -26,6 +26,7 @@ from nanobot.qa.validation import (
 
 CATALOG_ACTIONS = ("ingest", "list", "get", "diff")
 WORKFLOW_ACTIONS = ("create", "get", "validate", "submit", "apply", "resume", "export")
+RUN_ACTIONS = ("preflight", "start", "get")
 _LIST_DEFAULT = 10
 _LIST_MAX = 50
 
@@ -387,6 +388,138 @@ class QaApiWorkflowTool(_QaApiTool):
         }
 
 
+class QaApiRunTool(_QaApiTool):
+    """Preflight and run API cases with a pinned snapshot."""
+
+    name = "qa_api_run"
+    description = (
+        "Pinned API runs. preflight reports every blocker (case not ready, no request, no "
+        "assertions, unresolved variable, stale catalog reference, auth config) without sending "
+        "a request; start runs the selected ready cases through the fixed pytest template, pins "
+        "their revisions, batches more than 200 cases and masks credentials, then returns the "
+        "finished run; get returns one run summary with its failed tests."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": list(RUN_ACTIONS),
+                "description": "preflight | start | get",
+            },
+            "project_id": {
+                "type": "string",
+                "description": "Project id (proj_...); required by preflight and start.",
+            },
+            "case_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Explicit case ids in run order; omit to run every case of the project "
+                    "matching kind."
+                ),
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["api", "ui", "manual"],
+                "description": "Restrict the implicit selection by case kind.",
+            },
+            "auth": {
+                "type": "object",
+                "description": (
+                    "Auth config: {kind: none|bearer|login, token, path, body, token_path, "
+                    "header, prefix}. Values may be env:NAME references; credentials are "
+                    "never persisted."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": "Run name shown in the workbench.",
+            },
+            "environment": {
+                "type": "string",
+                "description": "Environment label recorded with the run.",
+            },
+            "run_id": {
+                "type": "string",
+                "description": "Run id (run_...), required by get.",
+            },
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    }
+
+    def _run(self, action: str, kwargs: dict[str, Any]) -> Any:
+        store = self._store()
+        if action == "preflight":
+            project_id = _text(kwargs.get("project_id"), "project_id")
+            if not project_id:
+                raise QaValidationError("project_id is required")
+            checked = execution.preflight(
+                store,
+                project_id,
+                case_ids=self._case_ids(kwargs),
+                kind=_text(kwargs.get("kind"), "kind") or None,
+                auth=self._auth(kwargs),
+            )
+            return {"action": "preflight", **self._compact(checked)}
+        if action == "start":
+            project_id = _text(kwargs.get("project_id"), "project_id")
+            if not project_id:
+                raise QaValidationError("project_id is required")
+            run = execution.execute_pinned(
+                store,
+                project_id,
+                case_ids=self._case_ids(kwargs),
+                kind=_text(kwargs.get("kind"), "kind") or None,
+                auth=self._auth(kwargs),
+                name=_text(kwargs.get("name"), "name"),
+                environment=_text(kwargs.get("environment"), "environment"),
+                trigger="agent",
+            )
+            return {"action": "start", "run": execution.run_summary(run)}
+        if action == "get":
+            run_id = _text(kwargs.get("run_id"), "run_id")
+            if not run_id:
+                raise QaValidationError("run_id is required")
+            return {"action": "get", "run": execution.run_summary(store.get_run(run_id))}
+        raise QaValidationError(f"action must be one of {', '.join(RUN_ACTIONS)}")
+
+    def _case_ids(self, kwargs: dict[str, Any]) -> list[str] | None:
+        value = kwargs.get("case_ids")
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise QaValidationError("case_ids must be an array of case ids")
+        return [item.strip() for item in value]
+
+    def _auth(self, kwargs: dict[str, Any]) -> dict[str, Any] | None:
+        value = kwargs.get("auth")
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise QaValidationError("auth must be a JSON object")
+        return value
+
+    def _compact(self, checked: dict[str, Any]) -> dict[str, Any]:
+        ready = checked.get("ready") or []
+        blocked = checked.get("blocked") or []
+        return {
+            "project_id": checked["project_id"],
+            "base_url": checked["base_url"],
+            "ok": checked["ok"],
+            "case_count": checked["case_count"],
+            "ready_count": len(ready),
+            "ready": ready[:20],
+            "blocked_count": len(blocked),
+            "blocked": blocked[:20],
+            "blockers": checked["blockers"],
+            "template_version": checked["template_version"],
+        }
+
+
 def api_tools() -> list[_QaApiTool]:
     """Return the API asset tools in a stable order."""
-    return [QaApiCatalogTool(), QaApiWorkflowTool()]
+    return [QaApiCatalogTool(), QaApiWorkflowTool(), QaApiRunTool()]

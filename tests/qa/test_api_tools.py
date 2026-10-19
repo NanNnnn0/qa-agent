@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.qa.api_tools import QaApiCatalogTool, QaApiWorkflowTool, api_tools
+from nanobot.qa.api_tools import (
+    QaApiCatalogTool,
+    QaApiRunTool,
+    QaApiWorkflowTool,
+    api_tools,
+)
 from nanobot.qa.store import QaStore
 
 SPEC = {
@@ -213,9 +218,65 @@ async def test_workflow_requires_ids(store: QaStore, project: dict) -> None:
     assert "workflow_id is required" in no_workflow["error"]
 
 
+async def test_run_tool_preflight_start_and_get(
+    store: QaStore, project: dict, demo_api: str,
+) -> None:
+    store.update_project(project["id"], base_url=demo_api)
+    store.create_case(
+        project["id"],
+        title="product list",
+        kind="api",
+        status="ready",
+        api={
+            "request": {"method": "GET", "path": "/api/products"},
+            "assertions": [{"type": "status", "expect": 200}],
+        },
+    )
+    tool = QaApiRunTool(store)
+    checked = await _call(tool, action="preflight", project_id=project["id"])
+    assert checked["ok"] is True
+    assert checked["ready_count"] == 1
+    assert checked["blockers"] == []
+
+    started = await _call(tool, action="start", project_id=project["id"], name="smoke")
+    assert started["run"]["status"] == "passed"
+    assert started["run"]["template_version"] == "1"
+    fetched = await _call(tool, action="get", run_id=started["run"]["id"])
+    assert fetched["run"]["id"] == started["run"]["id"]
+    assert fetched["run"]["failed_tests"] == []
+
+
+async def test_run_tool_reports_blockers(store: QaStore, project: dict) -> None:
+    store.create_case(
+        project["id"],
+        title="draft case",
+        kind="api",
+        status="draft",
+        api={
+            "request": {"method": "GET", "path": "/api/products"},
+            "assertions": [{"type": "status", "expect": 200}],
+        },
+    )
+    tool = QaApiRunTool(store)
+    checked = await _call(tool, action="preflight", project_id=project["id"])
+    assert checked["ok"] is False
+    assert checked["blocked_count"] == 1
+    assert checked["blocked"][0]["reasons"] == [
+        "status is 'draft', only ready cases execute",
+    ]
+    started = await _call(tool, action="start", project_id=project["id"])
+    assert "cannot run" in started["error"]
+    missing = await _call(tool, action="get")
+    assert "run_id is required" in missing["error"]
+
+
 def test_tool_schemas_are_provider_ready() -> None:
     tools = api_tools()
-    assert [tool.name for tool in tools] == ["qa_api_catalog", "qa_api_workflow"]
+    assert [tool.name for tool in tools] == [
+        "qa_api_catalog",
+        "qa_api_workflow",
+        "qa_api_run",
+    ]
     for tool in tools:
         schema = tool.to_schema()
         function = schema["function"]

@@ -5,6 +5,7 @@
 - ``GET  /api/products``  -> ``{"code":0,"items":[...]}``
 - ``POST /api/orders``    -> 201 ``{"code":0,"data":{"orderId":...}}``
 - ``GET  /api/orders/{id}``
+- ``POST /api/login``     -> 200 ``{"code":0,"data":{"token":...}}`` for qa / qa-pass
 - ``GET  /health``
 
 Intentional defects exist so the demo has something to find:
@@ -25,6 +26,8 @@ _PRODUCTS = {
     "B-2": {"sku": "B-2", "name": "机械键盘", "price": 399, "stock": 0},
 }
 _ORDERS: dict[str, dict[str, Any]] = {}
+_USERS = {"qa": "qa-pass"}
+_TOKENS: set[str] = set()
 _LOCK = threading.Lock()
 _COUNTER = {"n": 0}
 
@@ -75,6 +78,19 @@ class DemoHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
+        if path == "/api/login":
+            payload = self._body()
+            user = payload.get("user")
+            password = payload.get("password")
+            if not isinstance(user, str) or _USERS.get(user) != password:
+                _json_response(self, 401, {"code": 1003, "message": "bad credentials"})
+                return
+            with _LOCK:
+                _COUNTER["n"] += 1
+                token = f"tok_{_COUNTER['n']:04d}"
+                _TOKENS.add(token)
+            _json_response(self, 200, {"code": 0, "data": {"token": token, "user": user}})
+            return
         if path != "/api/orders":
             _json_response(self, 404, {"code": 1004, "message": "not found"})
             return

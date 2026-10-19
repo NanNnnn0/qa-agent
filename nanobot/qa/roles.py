@@ -28,7 +28,7 @@ ROLE_GUIDES: dict[str, str] = {
         "2) qa_api_catalog action=ingest 登记接口资料，action=list 分页查看，action=diff 先看变更；\n"
         "3) qa_case action=list 查重，避免重复用例；\n"
         "4) qa_api_workflow action=create 提交候选用例批次，action=validate 校验，action=apply 落库；\n"
-        "5) qa_run action=start 执行这些用例；\n"
+        "5) qa_api_run action=preflight 检查阻塞项，action=start 执行（固定模板、用例快照、分批、脱敏）；\n"
         "6) 根据失败断言写出缺陷摘要（不是重跑碰运气）。"
     ),
     "ui": (
@@ -66,6 +66,7 @@ _TAIL_CONTRACT = """\
 - 项目：qa_project action=get|list
 - 接口资料：qa_api_catalog action=ingest|list|get|diff（先登记资料，再设计用例）
 - 用例批次：qa_api_workflow action=create|get|validate|submit|apply|resume|export
+- 执行：qa_api_run action=preflight|start|get（start 走固定模板，运行记录固定用例修订）
 - 用例：qa_case action=list|create|bulk_create|update|delete（bulk_create 单次最多 50 条）
 - 脚本：qa_script action=create|update|list|get
 - 执行：qa_run action=start（case_ids 或 script_id）|list|get
@@ -79,6 +80,7 @@ _TAIL_CONTRACT = """\
  "variables": {{}}}}
 ```
 断言类型仅限：status / json_path / header / response_time_ms / body_contains。
+需要串场的数据用 api.extract 提取：键是名字，值是 JSONPath，后续用例用 run. 前缀的占位符引用。
 
 ## 硬性规则
 - 用例 kind 只用 api / ui / manual；priority 只用 P0/P1/P2/P3；编号由工具生成，除非明确指定。

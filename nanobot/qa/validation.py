@@ -27,6 +27,7 @@ RUN_TRIGGERS = ("manual", "ci", "agent", "schedule")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
 ASSERTION_TYPES = ("status", "json_path", "header", "response_time_ms", "body_contains")
+EXTRACT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 ASSERTION_OPS = ("equals", "exists", "contains", "gt", "lt", "matches")
 
 # Provenance of a case revision. `create` and `edit` cover the existing editor
@@ -218,6 +219,23 @@ def validate_api_spec(api: Any) -> dict[str, Any]:
         "assertions": normalized_assertions,
         "variables": _string_map(api.get("variables"), "api.variables"),
     }
+    extract = api.get("extract")
+    if extract is not None:
+        if not isinstance(extract, dict):
+            raise QaValidationError("api.extract must be a JSON object")
+        normalized_extract: dict[str, str] = {}
+        for name, path_value in extract.items():
+            if not isinstance(name, str) or not EXTRACT_NAME_RE.match(name):
+                raise QaValidationError(
+                    "api.extract keys must be identifiers, e.g. order_id"
+                )
+            if not isinstance(path_value, str) or not path_value.startswith("$"):
+                raise QaValidationError(
+                    f"api.extract['{name}'] must be a JSONPath string starting with '$'"
+                )
+            normalized_extract[name] = path_value
+        if normalized_extract:
+            spec["extract"] = normalized_extract
     return spec
 
 

@@ -1,6 +1,6 @@
 ---
 name: qa-api-testing
-description: 从接口资料生成可维护的结构化接口用例：登记接口目录、按场景矩阵设计、批次校验后落库、执行并给出结论。
+description: 从接口资料生成可维护的结构化接口用例：登记接口目录、按场景矩阵设计、批次校验后落库、预检执行并给出结论。
 metadata: {"nanobot":{"emoji":"🔌"}}
 ---
 
@@ -8,14 +8,14 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 
 ## 固定顺序
 
-登记资料 → 设计场景 → 提交批次 → 校验 → 应用 → 执行 → 结论。顺序不要跳步：没有登记过的接口，用例里不要引用。
+登记资料 → 设计场景 → 提交批次 → 校验 → 应用 → 预检 → 执行 → 结论。顺序不要跳步：没有登记过的接口，用例里不要引用。
 
 ## 第 1 步：登记接口资料
 
 - **OpenAPI 3.0/3.1（JSON 或 YAML）**：`qa_api_catalog action=ingest project_id=... document="<文档全文>"`。
 - **本地文件**：先在部署环境配置 `NANOBOT_QA_SPEC_ROOTS`（多个目录用 `:` 分隔），再传 `source_path=/srv/specs/orders.yaml`。路径不在允许目录内会直接报错，不会自动下载远程文档。
 - **Markdown / 源码片段**：自己定位相关段落，用 `source_kind=markdown|source` + `source_ref`（文件路径或提交号）+ 摘录登记，不追求通用解析。
-- 重复登记同一份资料不会新增接口；资料里删掉的接口会被标记为 `missing`，已有用例不会被删除。
+- 重复登记同一份资料不会新增接口；资料里删掉的接口会被标记为 `missing`，已有用例不会被删除，但引用它的用例会在预检时被拦下。
 - 先用 `action=diff` 看会新增、变更、消失哪些接口，再决定是否 `action=ingest`；`action=list` 默认每页 10 条，`action=get` 取单个接口的 spec 与证据。
 
 ## 第 2 步：场景矩阵
@@ -61,15 +61,19 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 - 批次失败：`action=resume` 看检查点和错误，修好候选后 `action=submit` 替换，再 `action=apply`。已 applied 的批次重复 apply 不会产生副作用。
 - 需要留档：`action=export` 返回批次和用例修订快照，适合提交进 Git。
 
-## 第 4 步：执行
+## 第 4 步：预检与执行
 
-`qa_run action=start project_id=... case_ids=[...]`。结果：
+先预检，再执行，不要跳过预检：
 
-- `passed`：全部断言通过。
-- `failed`：断言失败 → 逐条看 `checks`，区分产品缺陷和断言写错。
-- `blocked_by_env`：全部用例连不上 → 检查 base_url 和服务是否启动，报告阻塞而不是报缺陷。
+- `qa_api_run action=preflight project_id=...`：返回阻塞项。常见阻塞是未 ready、缺 `api.request`、缺断言、变量缺失、引用的接口资料已 `missing`、项目没有 base_url、鉴权配置错误。有阻塞就修用例或资料。
+- `qa_api_run action=start project_id=... case_ids=[...] auth={...}`：走固定 pytest 模板执行。运行记录会固定每条用例的修订号和模板版本，之后改用例不会改变这次运行依据；超过 200 条自动分批，汇总覆盖全部选中范围。
+- `qa_api_run action=get run_id=...`：看结论和失败用例的分类。
+- 鉴权：`auth` 支持 `{"kind":"bearer","token":"env:QA_TOKEN"}` 和 `{"kind":"login","path":"/api/login","body":{"user":"env:QA_USER","password":"env:QA_PASS"},"token_path":"$.data.token"}`。凭证只存在于运行上下文，报告和日志已脱敏。
+- 需要串场数据：在创建用例里写 `api.extract`（名字到 JSONPath 的映射），后续用例用 `run.` 前缀的占位符引用；提取值只在本次运行内有效。
 
-需要登录的接口：把 token 放进项目 `default_env`（`{"token":"..."}`），用例里写 `{{token}}`。
+失败分类：`assertion_failed`（断言失败，先判断是产品缺陷还是断言写错）、`config_error`（用例或配置问题）、`env_blocked`（连不上，报阻塞而不是缺陷）、`auth_failed`（登录或凭证问题）。
+
+临时手工验证仍可用 `qa_run action=start`，但它不做预检、不固定快照、不分批，也不脱敏，不要用它出正式结论。
 
 ## 第 5 步：结论
 

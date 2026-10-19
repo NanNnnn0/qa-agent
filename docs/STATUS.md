@@ -21,7 +21,7 @@ The QA test row and the API asset layer were re-verified on 2026-10-19 in worktr
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 123 passed in 11.41s (2026-10-19, `feat/qa-api-testing`) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 146 passed in 23.84s (2026-10-19, `feat/qa-api-testing`) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
@@ -37,7 +37,8 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 - API asset layer (schema version 3): `api_operations` catalog, `api_case_metadata`, `api_case_revisions` and `api_workflows` in the same SQLite database. Every case write records a revision, catalog re-ingestion is idempotent and marks dropped endpoints `missing` instead of deleting them, and a candidate batch applies in one transaction. `export_cases` returns every case in scope plus `total`; the paged listing keeps its 500-row page cap.
 - HTTP and WebSocket surface: `/api/qa/*` routes plus `qa.*` mutation actions on the WebSocket channel.
 - Model-facing tools and skills: `nanobot/agent/tools/qa.py`, `spawn_task` in `nanobot/agent/subagent.py`, five `qa-*` skills; `nanobot/skills/qa-api-testing/SKILL.md` now leads with catalog ingestion and a staged batch.
-- MCP API asset tools: `qa_api_catalog` (ingest/list/get/diff) and `qa_api_workflow` (create/get/validate/submit/apply/resume/export) in `nanobot/qa/api_tools.py`, registered in the stdio MCP server. Local OpenAPI files are only read under `NANOBOT_QA_SPEC_ROOTS`; `qa_api_run` arrives with the execution template.
+- MCP API asset tools: `qa_api_catalog` (ingest/list/get/diff), `qa_api_workflow` (create/get/validate/submit/apply/resume/export) and `qa_api_run` (preflight/start/get) in `nanobot/qa/api_tools.py`, registered in the stdio MCP server. Local OpenAPI files are only read under `NANOBOT_QA_SPEC_ROOTS`.
+- Pinned API runs: `nanobot/qa/execution.py` gates a run with preflight, executes ready cases through the fixed `nanobot/qa/templates/case_template.py` in a subprocess, pins each case revision in the run report, batches above 200 cases, masks credentials (bearer or JSON login, `env:NAME` references) and classifies every failure. `api.extract` plus `{{run.<name>}}` chains values between cases; a failed login persists a run with `classification: auth_failed`.
 - QA workbench: `webui/src/components/qa/` and `webui/src/lib/qa-api.ts` (71 TS/TSX files including the API client).
 - Tests: `tests/qa/` (15 files) and `webui/src/tests/qa-*.test.tsx`.
 - Docs: `docs/qa-agent.md`, `docs/design/qa-platform.md`, `docs/design/qa-webui-brief.md`, `docs/research/` (4 files), plus the inherited upstream pages under `docs/`.
