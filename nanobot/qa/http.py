@@ -70,6 +70,10 @@ QA_MUTATION_PATHS: dict[str, str] = {
     "qa.task.reject": "/api/qa/tasks/reject",
     "qa.run.start": "/api/qa/runs/start",
     "qa.run.import": "/api/qa/runs/import",
+    "qa.schedule.create": "/api/qa/schedules/create",
+    "qa.schedule.update": "/api/qa/schedules/update",
+    "qa.schedule.delete": "/api/qa/schedules/delete",
+    "qa.schedule.run_now": "/api/qa/schedules/run-now",
     # P4: trace-chain review. ``stale_write`` only records a baseline; the two
     # review actions are the only way a draft enters the formal library.
     "qa.trace.stale_write": "/api/qa/trace/stale/write",
@@ -236,6 +240,10 @@ class QaApi:
             ))
         if path.startswith(f"{QA_PREFIX}/runs/"):
             return _ok({"run": store.get_run(path.rsplit("/", 1)[-1])})
+        if path == f"{QA_PREFIX}/schedules":
+            return _ok({"items": store.list_schedules(
+                project_id=_query_first(query, "project_id") or None,
+            )})
         if path == f"{QA_PREFIX}/tasks":
             return _ok(store.list_tasks(
                 project_id=_query_first(query, "project_id") or None,
@@ -452,6 +460,34 @@ class QaApi:
                 trigger=str(payload.get("trigger") or "ci"),
             )
             return _ok({"run": run})
+        if path == "/api/qa/schedules/create":
+            schedule = store.create_schedule(
+                _require_field(payload, "project_id"),
+                name=_require_field(payload, "name"),
+                cron=_require_field(payload, "cron"),
+                timezone=str(payload.get("timezone") or ""),
+                enabled=payload.get("enabled", True),
+                target=payload.get("target"),
+            )
+            return _ok({"schedule": schedule})
+        if path == "/api/qa/schedules/update":
+            schedule_id = _require_id(payload)
+            updates = _fields(
+                payload, {"name", "cron", "timezone", "enabled", "target"},
+            )
+            return _ok({"schedule": store.update_schedule(schedule_id, **updates)})
+        if path == "/api/qa/schedules/delete":
+            store.delete_schedule(_require_id(payload))
+            return _ok({"deleted": True})
+        if path == "/api/qa/schedules/run-now":
+            from nanobot.qa.scheduler import run_schedule
+
+            schedule = store.get_schedule(_require_id(payload))
+            run = await asyncio.to_thread(run_schedule, store, schedule)
+            store.record_schedule_run(
+                schedule["id"], run_id=run["id"], status=run["status"],
+            )
+            return _ok({"run": run, "schedule": store.get_schedule(schedule["id"])})
         return _error(404, "QA mutation route not found")
 
 

@@ -587,7 +587,7 @@ function QaScriptDrawer({
 export function QaRunResult({ run }: { run: QaRun }) {
   const tx = useQaCopy();
   return (
-    <QaPanel className="px-3 py-2.5" data-testid="qa-run-result">
+    <QaPanel className="px-3 py-2.5" testId="qa-run-result">
       <div className="flex flex-wrap items-center gap-2">
         <QaRunStatusBadge status={run.status} />
         <QaRunTriggerBadge trigger={run.trigger} />

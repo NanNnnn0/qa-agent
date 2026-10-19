@@ -185,6 +185,30 @@ export interface QaRun {
   log: string;
 }
 
+export type QaScheduleTarget =
+  | { kind: "script"; script_id: string }
+  | { kind: "cases"; case_ids: string[]; run_kind?: QaCaseKind };
+
+export interface QaSchedule {
+  id: string;
+  project_id: string;
+  name: string;
+  /** Standard five-field cron expression. */
+  cron: string;
+  /** IANA zone; empty uses the gateway's local zone. */
+  timezone: string;
+  enabled: boolean;
+  target: QaScheduleTarget;
+  next_run_at: string | null;
+  last_run_at: string;
+  last_run_id: string;
+  /** Status of the last run (`passed`, `failed`, `blocked_by_env`, `error`). */
+  last_status: string;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface QaTaskArtifact {
   kind: string;
   ref_id: string;
@@ -486,6 +510,37 @@ function normalizeRun(value: unknown): QaRun {
   };
 }
 
+function normalizeSchedule(value: unknown): QaSchedule {
+  const row = isRecord(value) ? value : {};
+  const rawTarget = isRecord(row.target) ? row.target : {};
+  const target: QaScheduleTarget =
+    rawTarget.kind === "script"
+      ? { kind: "script", script_id: text(rawTarget.script_id) }
+      : {
+          kind: "cases",
+          case_ids: textList(rawTarget.case_ids),
+          ...(typeof rawTarget.run_kind === "string" && rawTarget.run_kind
+            ? { run_kind: rawTarget.run_kind as QaCaseKind }
+            : {}),
+        };
+  return {
+    id: text(row.id),
+    project_id: text(row.project_id),
+    name: text(row.name),
+    cron: text(row.cron),
+    timezone: text(row.timezone),
+    enabled: row.enabled === true || row.enabled === 1,
+    target,
+    next_run_at: typeof row.next_run_at === "string" && row.next_run_at ? row.next_run_at : null,
+    last_run_at: text(row.last_run_at),
+    last_run_id: text(row.last_run_id),
+    last_status: text(row.last_status),
+    last_error: text(row.last_error),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 const TASK_STATUSES: QaTaskStatus[] = [
   "queued",
   "running",
@@ -767,6 +822,21 @@ export async function loadQaRuns(token: string, query: QaRunQuery = {}): Promise
 export async function loadQaRun(token: string, id: string): Promise<QaRun> {
   const payload = await request<RawRecord>(`/api/qa/runs/${encodeURIComponent(id)}`, token);
   return normalizeRun(payload.run);
+}
+
+export interface QaScheduleQuery {
+  projectId?: string;
+}
+
+export async function loadQaSchedules(
+  token: string,
+  query: QaScheduleQuery = {},
+): Promise<QaSchedule[]> {
+  const payload = await request<RawRecord>(
+    `/api/qa/schedules${qaQuery({ project_id: query.projectId })}`,
+    token,
+  );
+  return Array.isArray(payload.items) ? payload.items.map(normalizeSchedule) : [];
 }
 
 export interface QaTaskQuery {
@@ -1185,6 +1255,69 @@ export async function importRun(
       trigger: input.trigger,
     }),
     QA_RUN_IMPORT_TIMEOUT_MS,
+  );
+  return readEntity(payload, "run", normalizeRun);
+}
+
+export interface QaScheduleInput {
+  project_id: string;
+  name: string;
+  cron: string;
+  timezone?: string;
+  enabled?: boolean;
+  target: QaScheduleTarget;
+}
+
+export interface QaScheduleUpdateInput {
+  name?: string;
+  cron?: string;
+  timezone?: string;
+  enabled?: boolean;
+  target?: QaScheduleTarget;
+}
+
+export async function createQaSchedule(
+  transport: QaMutationTransport,
+  input: QaScheduleInput,
+): Promise<QaSchedule> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.schedule.create",
+    compactPayload({ ...input }),
+  );
+  return readEntity(payload, "schedule", normalizeSchedule);
+}
+
+export async function updateQaSchedule(
+  transport: QaMutationTransport,
+  id: string,
+  input: QaScheduleUpdateInput,
+): Promise<QaSchedule> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.schedule.update",
+    compactUpdate({ id, ...input }),
+  );
+  return readEntity(payload, "schedule", normalizeSchedule);
+}
+
+export async function deleteQaSchedule(
+  transport: QaMutationTransport,
+  id: string,
+): Promise<void> {
+  await mutation(transport, "qa.schedule.delete", { id });
+}
+
+/** Run a schedule now; returns the persisted run so the UI can show it. */
+export async function runQaSchedule(
+  transport: QaMutationTransport,
+  id: string,
+): Promise<QaRun> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.schedule.run_now",
+    { id },
+    QA_RUN_TIMEOUT_MS,
   );
   return readEntity(payload, "run", normalizeRun);
 }

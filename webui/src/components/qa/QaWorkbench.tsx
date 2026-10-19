@@ -9,15 +9,31 @@ import { cn } from "@/lib/utils";
 import { QaCaseLibrary } from "./QaCaseLibrary";
 import { QaOverview } from "./QaOverview";
 import { QaRuns } from "./QaRuns";
+import { QaSchedules } from "./QaSchedules";
 import { QaScripts } from "./QaScripts";
 import { QaTaskBoard } from "./QaTaskBoard";
 import { QaTrace } from "./QaTrace";
 import { QaErrorBar, useQaCopy } from "./qa-ui";
 import { useQaQuery } from "./useQaQuery";
 
-export type QaTab = "overview" | "tasks" | "cases" | "scripts" | "runs" | "trace";
+export type QaTab =
+  | "overview"
+  | "tasks"
+  | "cases"
+  | "scripts"
+  | "schedules"
+  | "runs"
+  | "trace";
 
-const QA_TABS: QaTab[] = ["overview", "tasks", "cases", "scripts", "runs", "trace"];
+const QA_TABS: QaTab[] = [
+  "overview",
+  "tasks",
+  "cases",
+  "scripts",
+  "schedules",
+  "runs",
+  "trace",
+];
 
 /** Visible list polling cadence; tests pass `pollIntervalMs={0}`. */
 export const QA_POLL_INTERVAL_MS = 3_000;
@@ -59,6 +75,7 @@ export function QaWorkbench({
     tasks: tx("qa.tabs.tasks", "任务板"),
     cases: tx("qa.tabs.cases", "用例库"),
     scripts: tx("qa.tabs.scripts", "自动化"),
+    schedules: tx("qa.tabs.schedules", "定时任务"),
     runs: tx("qa.tabs.runs", "运行记录"),
     trace: tx("qa.tabs.trace", "追溯"),
   };
@@ -188,6 +205,16 @@ export function QaWorkbench({
                 client={client}
                 projects={projects}
                 refreshSignal={refreshSignal}
+                onChanged={refresh}
+              />
+            ) : null}
+            {tab === "schedules" ? (
+              <QaSchedules
+                token={token}
+                client={client}
+                projects={projects}
+                refreshSignal={refreshSignal}
+                pollIntervalMs={pollIntervalMs}
                 onChanged={refresh}
               />
             ) : null}

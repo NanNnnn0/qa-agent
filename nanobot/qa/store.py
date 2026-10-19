@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from nanobot.qa.schedule_time import iso_to_ms, next_run_iso, validate_schedule_fields
 from nanobot.qa.util import dumps, loads, new_id, utcnow_iso
 from nanobot.qa.validation import (
     CASE_KINDS,
@@ -121,6 +122,25 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, started_at);
 
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    target TEXT NOT NULL,
+    next_run_at TEXT,
+    last_run_at TEXT NOT NULL DEFAULT '',
+    last_run_id TEXT NOT NULL DEFAULT '',
+    last_status TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_project ON schedules(project_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
@@ -162,6 +182,7 @@ _JSON_CASE_FIELDS = ("steps", "api", "tags")
 _JSON_PROJECT_FIELDS = ("default_env",)
 _JSON_SCRIPT_FIELDS = ("case_ids", "tags")
 _JSON_RUN_FIELDS = ("case_ids", "report")
+_JSON_SCHEDULE_FIELDS = ("target",)
 _JSON_TASK_EVENT_FIELDS = ("data",)
 
 #: Columns of a YAML-derived case row (everything except the timestamps).
@@ -209,6 +230,7 @@ _TASK_UPDATE_FIELDS = {
     "project_id", "parent_id", "role", "title", "prompt", "status", "progress",
     "session_key", "subagent_task_id", "result",
 }
+_SCHEDULE_UPDATE_FIELDS = {"name", "cron", "timezone", "enabled", "target"}
 
 
 def _row_to_dict(row: sqlite3.Row, json_fields: Iterable[str] = ()) -> dict[str, Any]:
@@ -1031,6 +1053,197 @@ class QaStore:
             "items": items,
             "total": int(total_row["total"]) if total_row is not None else 0,
         }
+
+    # -- schedules ---------------------------------------------------------
+
+    def _normalize_schedule_target(
+        self, project_id: str, raw: Any,
+    ) -> dict[str, Any]:
+        """Validate a schedule target against the project that owns it."""
+        if not isinstance(raw, dict):
+            raise QaValidationError("target must be an object")
+        kind = raw.get("kind")
+        if kind == "script":
+            script_id = raw.get("script_id")
+            if not isinstance(script_id, str) or not script_id.strip():
+                raise QaValidationError("target.script_id is required")
+            script = self.get_script(script_id.strip(), include_content=False)
+            if script["project_id"] != project_id:
+                raise QaValidationError("script does not belong to this project")
+            return {"kind": "script", "script_id": script["id"]}
+        if kind == "cases":
+            case_ids = raw.get("case_ids")
+            if not isinstance(case_ids, list) or not case_ids or not all(
+                isinstance(item, str) and item.strip() for item in case_ids
+            ):
+                raise QaValidationError(
+                    "target.case_ids must be a non-empty array of case ids"
+                )
+            normalized: list[str] = []
+            for case_id in case_ids:
+                case = self.get_case(case_id.strip())
+                if case["project_id"] != project_id:
+                    raise QaValidationError(
+                        f"case '{case_id}' does not belong to this project"
+                    )
+                if case["id"] not in normalized:
+                    normalized.append(case["id"])
+            target: dict[str, Any] = {"kind": "cases", "case_ids": normalized}
+            run_kind = raw.get("run_kind")
+            if run_kind is not None:
+                target["run_kind"] = require_enum(run_kind, "target.run_kind", CASE_KINDS)
+            return target
+        raise QaValidationError("target.kind must be 'script' or 'cases'")
+
+    def create_schedule(
+        self,
+        project_id: str,
+        *,
+        name: str,
+        cron: str,
+        timezone: str = "",
+        enabled: bool = True,
+        target: Any = None,
+    ) -> dict[str, Any]:
+        self._require_project(project_id)
+        schedule_name = require_text(name, "name", max_length=200)
+        expr, zone = validate_schedule_fields(cron, timezone)
+        normalized_target = self._normalize_schedule_target(project_id, target)
+        if not isinstance(enabled, bool):
+            raise QaValidationError("enabled must be a boolean")
+        now = utcnow_iso()
+        schedule_id = new_id("sch")
+        self._write(
+            "INSERT INTO schedules (id, project_id, name, cron, timezone, enabled,"
+            " target, next_run_at, last_run_at, last_run_id, last_status, last_error,"
+            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', '', '', ?, ?)",
+            (
+                schedule_id,
+                project_id,
+                schedule_name,
+                expr,
+                zone,
+                int(enabled),
+                dumps(normalized_target),
+                next_run_iso(expr, zone) if enabled else None,
+                now,
+                now,
+            ),
+        )
+        return self.get_schedule(schedule_id)
+
+    def update_schedule(self, schedule_id: str, **fields: Any) -> dict[str, Any]:
+        current = self.get_schedule(schedule_id)
+        updates: dict[str, Any] = {}
+        for field, value in fields.items():
+            if field not in _SCHEDULE_UPDATE_FIELDS or value is None:
+                continue
+            if field == "name":
+                updates["name"] = require_text(value, "name", max_length=200)
+            elif field in {"cron", "timezone"}:
+                updates[field] = value
+            elif field == "enabled":
+                if not isinstance(value, bool):
+                    raise QaValidationError("enabled must be a boolean")
+                updates["enabled"] = int(value)
+            elif field == "target":
+                updates["target"] = dumps(
+                    self._normalize_schedule_target(current["project_id"], value)
+                )
+        expr = str(updates.get("cron", current["cron"]))
+        zone = str(updates.get("timezone", current["timezone"]))
+        if "cron" in updates or "timezone" in updates:
+            expr, zone = validate_schedule_fields(expr, zone)
+            updates["cron"], updates["timezone"] = expr, zone
+        if {"cron", "timezone", "enabled", "target"} & set(updates):
+            enabled = bool(updates.get("enabled", current["enabled"]))
+            updates["next_run_at"] = next_run_iso(expr, zone) if enabled else None
+        if not updates:
+            return current
+        updates["updated_at"] = utcnow_iso()
+        assignments = ", ".join(f"{field} = ?" for field in updates)
+        self._write(
+            f"UPDATE schedules SET {assignments} WHERE id = ?",
+            (*updates.values(), schedule_id),
+        )
+        return self.get_schedule(schedule_id)
+
+    def delete_schedule(self, schedule_id: str) -> None:
+        self.get_schedule(schedule_id)
+        self._write("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+
+    def get_schedule(self, schedule_id: str) -> dict[str, Any]:
+        row = self._fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
+        if row is None:
+            raise QaNotFoundError(f"schedule '{schedule_id}' not found")
+        return _row_to_dict(row, _JSON_SCHEDULE_FIELDS)
+
+    def list_schedules(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        where = " WHERE project_id = ?" if project_id else ""
+        params = (project_id,) if project_id else ()
+        rows = self._fetchall(
+            f"SELECT * FROM schedules{where} ORDER BY enabled DESC,"
+            " next_run_at IS NULL, next_run_at, created_at",
+            params,
+        )
+        return [_row_to_dict(row, _JSON_SCHEDULE_FIELDS) for row in rows]
+
+    def claim_due_schedules(
+        self, now_iso: str | None = None, *, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Claim due schedules with a conditional update.
+
+        The update compares the stored ``next_run_at`` with the value read, so
+        two gateway processes sharing the database cannot both run one
+        occurrence: only the process whose update changes a row wins it.
+        """
+        now = now_iso or utcnow_iso()
+        now_ms = iso_to_ms(now)
+        claimed: list[dict[str, Any]] = []
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT * FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL"
+                " AND next_run_at <= ? ORDER BY next_run_at LIMIT ?",
+                (now, max(1, min(int(limit), 100))),
+            ).fetchall()
+            for row in rows:
+                schedule = _row_to_dict(row, _JSON_SCHEDULE_FIELDS)
+                following = next_run_iso(
+                    schedule["cron"], schedule["timezone"], now_ms=now_ms,
+                )
+                cursor = self._conn.execute(
+                    "UPDATE schedules SET next_run_at = ?, updated_at = ?"
+                    " WHERE id = ? AND next_run_at = ?",
+                    (following, utcnow_iso(), schedule["id"], schedule["next_run_at"]),
+                )
+                if cursor.rowcount == 1:
+                    schedule["next_run_at"] = following
+                    claimed.append(schedule)
+        return claimed
+
+    def record_schedule_run(
+        self,
+        schedule_id: str,
+        *,
+        run_id: str = "",
+        status: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        self.get_schedule(schedule_id)
+        now = utcnow_iso()
+        self._write(
+            "UPDATE schedules SET last_run_at = ?, last_run_id = ?, last_status = ?,"
+            " last_error = ?, updated_at = ? WHERE id = ?",
+            (
+                now,
+                optional_text(run_id, "run_id", max_length=60),
+                optional_text(status, "status", max_length=40),
+                optional_text(error, "error", max_length=2000),
+                now,
+                schedule_id,
+            ),
+        )
+        return self.get_schedule(schedule_id)
 
     # -- tasks -------------------------------------------------------------
 

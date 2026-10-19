@@ -324,7 +324,7 @@ describe("QA workbench", () => {
   it("renders the five tabs and the overview data", async () => {
     renderWorkbench();
 
-    for (const id of ["overview", "tasks", "cases", "scripts", "runs"]) {
+    for (const id of ["overview", "tasks", "cases", "scripts", "schedules", "runs"]) {
       expect(screen.getByTestId(`qa-tab-${id}`)).toBeInTheDocument();
     }
     expect(screen.getByTestId("qa-tab-overview")).toHaveAttribute("aria-selected", "true");
