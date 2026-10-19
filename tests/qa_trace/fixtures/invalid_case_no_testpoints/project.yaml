@@ -1,0 +1,3 @@
+schema_version: 1
+project_id: no-testpoints
+name: Invalid fixture - case hangs off a source without a reason

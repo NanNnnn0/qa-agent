@@ -1067,3 +1067,1079 @@ export async function importRun(
   );
   return readEntity(payload, "run", normalizeRun);
 }
+
+// -- P4: trace chain ------------------------------------------------------
+//
+// The traceability chain is served by `nanobot/qa/trace_api.py`, which calls the
+// `qa_trace` library. The four headline metrics stay separate all the way into
+// the UI: requirement coverage, behavior coverage, automation rate and orphan
+// rate are never merged into one "coverage" number (spec section 4).
+
+export interface QaTraceProjectCounts {
+  sources: number;
+  testpoints: number;
+  cases: number;
+}
+
+export interface QaTraceProject {
+  id: string;
+  name: string;
+  root: string;
+  /** `null` when the project could not be inspected at all. */
+  valid: boolean | null;
+  error: string;
+  modules: string[];
+  counts: QaTraceProjectCounts;
+}
+
+export interface QaTraceRatio {
+  numerator: number;
+  denominator: number;
+  /** `null` when the denominator is 0 — never rendered as 100%. */
+  percent: number | null;
+}
+
+export interface QaTraceCoverageBlock {
+  label: string;
+  types: string[];
+  reviewed: QaTraceRatio;
+  current_valid: QaTraceRatio;
+  uncovered: string[];
+  unconfirmed_sources: string[];
+}
+
+export interface QaTraceAutomationBlock {
+  label: string;
+  reviewed: QaTraceRatio;
+  provisional: boolean;
+  provisional_reason: string;
+  unresolved_scripts: string[];
+}
+
+export interface QaTraceOrphanBlock {
+  label: string;
+  library: QaTraceRatio;
+  case_ids: string[];
+}
+
+export interface QaTraceCoverage {
+  requirement: QaTraceCoverageBlock;
+  behavior: QaTraceCoverageBlock;
+  automation: QaTraceAutomationBlock;
+  orphan: QaTraceOrphanBlock;
+}
+
+export interface QaTraceRecheck {
+  case_id: string;
+  reasons: string[];
+  changed_ids: string[];
+  reviewed_by: string | null;
+}
+
+export interface QaTraceDiagnostic {
+  severity: string;
+  code: string;
+  entity_id: string | null;
+  path: string | null;
+  field: string | null;
+  message: string;
+  suggestion: string | null;
+}
+
+export interface QaTraceStaleBlock {
+  error: string;
+  baseline: string;
+  counts: Record<string, number>;
+  needs_recheck: QaTraceRecheck[];
+}
+
+export interface QaTraceDraftsBlock {
+  error: string;
+  counts: Record<string, number>;
+  batches: string[];
+}
+
+export interface QaTraceRunsBlock {
+  error: string;
+  counts: Record<string, number>;
+}
+
+export interface QaTraceProjectRef {
+  id: string;
+  name: string;
+  root: string;
+  modules: string[];
+}
+
+export interface QaTraceSummary {
+  project: QaTraceProjectRef;
+  valid: boolean;
+  counts: Record<string, number>;
+  coverage: QaTraceCoverage | null;
+  requirement_gaps: {
+    uncovered_requirements: string[];
+    cases_without_requirement_root: string[];
+    count: number;
+    uncovered_requirement_count: number;
+  } | null;
+  dangling_count: number;
+  dead_assets: {
+    sources_without_downstream: string[];
+    deprecated_cases: string[];
+    manual_p0_cases: { status: string; candidates: string[] };
+    count: number;
+  } | null;
+  metrics_suppressed: string;
+  diagnostics: { counts: Record<string, number>; items: QaTraceDiagnostic[] };
+  stale: QaTraceStaleBlock | null;
+  drafts: QaTraceDraftsBlock | null;
+  runs: QaTraceRunsBlock | null;
+}
+
+export interface QaTraceScriptRef {
+  case_id: string;
+  binding: string;
+  file: string;
+  nodeid: string;
+  resolves: boolean;
+  problem: string;
+}
+
+export interface QaTraceCaseNode {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  type: string;
+  automation: string;
+  owner: string;
+  tags: string[];
+  testpoints: string[];
+  sources: string[];
+  script: QaTraceScriptRef | null;
+  needs_recheck: boolean;
+  recheck_reasons: string[];
+  changed_ids: string[];
+}
+
+export interface QaTraceTestPointNode {
+  id: string;
+  title: string;
+  status: string;
+  method: string;
+  risk: string;
+  module: string;
+  owner: string;
+  sources: string[];
+  cases: QaTraceCaseNode[];
+}
+
+export interface QaTraceEvidenceNode {
+  type: string;
+  locator: string;
+  description: string;
+  verified: string;
+}
+
+export interface QaTraceSourceNode {
+  id: string;
+  type: string;
+  title: string;
+  status: string;
+  confidence: string;
+  module: string;
+  owner: string;
+  url: string;
+  app_version: string;
+  observed_at: string;
+  stale: boolean;
+  evidence: QaTraceEvidenceNode[];
+  testpoints: QaTraceTestPointNode[];
+  /** Cases that hang directly off the source (they must declare direct_reason). */
+  cases: QaTraceCaseNode[];
+  case_count: number;
+}
+
+export interface QaTraceTree {
+  project: QaTraceProjectRef;
+  counts: {
+    sources: number;
+    testpoints: number;
+    cases: number;
+    scripts: number;
+    orphans: number;
+  };
+  sources: QaTraceSourceNode[];
+  orphans: QaTraceCaseNode[];
+  scripts: QaTraceScriptRef[];
+}
+
+export interface QaTraceImpactCase {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  automation: string;
+  script: string;
+  needs_recheck: boolean;
+  reasons: string[];
+  changed_ids: string[];
+  via: { source_id: string; testpoint_id: string | null }[];
+}
+
+export interface QaTraceImpact {
+  target: { id: string; kind: string };
+  counts: {
+    testpoints: number;
+    cases: number;
+    scripts: number;
+    needs_recheck: number;
+  };
+  testpoints: {
+    id: string;
+    exists: boolean;
+    title: string;
+    status: string;
+    method: string;
+    risk: string;
+  }[];
+  cases: QaTraceImpactCase[];
+  scripts: QaTraceScriptRef[];
+  sources: {
+    id: string;
+    exists: boolean;
+    type: string;
+    title: string;
+    status: string;
+    confidence: string;
+    stale: boolean | null;
+  }[];
+}
+
+export interface QaTraceChangedEntity {
+  id: string;
+  kind: string;
+  content_changed: boolean;
+  dependency_changed: boolean;
+  in_baseline: boolean;
+}
+
+export interface QaTraceStale {
+  baseline: string;
+  written: boolean;
+  recorded: number;
+  index: string;
+  counts: Record<string, number>;
+  changed: QaTraceChangedEntity[];
+  removed: string[];
+  needs_recheck: QaTraceRecheck[];
+}
+
+export interface QaTraceDraft {
+  batch: string;
+  id: string;
+  kind: string;
+  path: string;
+  status: string;
+  valid: boolean;
+  problems: string[];
+  note: string;
+  rejected_by: string;
+  rejected_at: string;
+}
+
+export interface QaTraceDraftList {
+  counts: Record<string, number>;
+  batches: string[];
+  drafts: QaTraceDraft[];
+}
+
+export interface QaTraceReviewOutcome {
+  id: string;
+  kind: string;
+  mode: string;
+  path: string;
+  reviewed_by: string;
+  reviewed_at: string;
+  note: string;
+  needs_recheck: boolean;
+}
+
+export interface QaTraceFailureResult {
+  nodeid: string;
+  attempt: number;
+  outcome: string;
+  failure_stage: string;
+  duration_ms: number;
+  error_summary: string;
+}
+
+export interface QaTraceFailureCase {
+  case_id: string;
+  results: QaTraceFailureResult[];
+  chain: {
+    origin: string;
+    testpoints: { id: string; exists: boolean; title: string; status: string }[];
+    sources: {
+      id: string;
+      exists: boolean;
+      type: string;
+      status: string;
+      confidence: string;
+      stale: boolean | null;
+    }[];
+  };
+  current: {
+    exists: boolean;
+    status: string;
+    changed_since_run: boolean | null;
+    needs_recheck: boolean;
+    reasons: string[];
+    changed_ids: string[];
+  };
+  last_run: { run_id: string; outcome: string; finished_at: string } | null;
+}
+
+export interface QaTraceFailure {
+  run: {
+    run_id: string;
+    status: string;
+    exitstatus: number | null;
+    started_at: string;
+    finished_at: string;
+    environment: string;
+    code_commit: string | null;
+    tool_version: string;
+    path: string;
+  };
+  requested_case: string;
+  case_missing: boolean;
+  counts: Record<string, number>;
+  failures: QaTraceFailureCase[];
+}
+
+export interface QaTraceRunSummary {
+  run_id: string;
+  status: string;
+  exitstatus: number | null;
+  started_at: string;
+  finished_at: string;
+  environment: string;
+  app_version: string;
+  code_commit: string | null;
+  tool_version: string;
+  path: string;
+  results: number;
+  failed_cases: number;
+  failed_case_ids: string[];
+}
+
+export interface QaTraceRunList {
+  counts: Record<string, number>;
+  items: QaTraceRunSummary[];
+}
+
+// -- trace normalization --------------------------------------------------
+
+function numberRecord(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value)) out[key] = integer(entry);
+  return out;
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = number(value, Number.NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTraceRatio(value: unknown): QaTraceRatio {
+  const row = isRecord(value) ? value : {};
+  return {
+    numerator: integer(row.numerator),
+    denominator: integer(row.denominator),
+    percent: nullableNumber(row.percent),
+  };
+}
+
+function normalizeTraceProjectRef(value: unknown): QaTraceProjectRef {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    name: text(row.name),
+    root: text(row.root),
+    modules: textList(row.modules),
+  };
+}
+
+function normalizeTraceProject(value: unknown): QaTraceProject {
+  const row = isRecord(value) ? value : {};
+  const counts = isRecord(row.counts) ? row.counts : {};
+  const valid = row.valid;
+  return {
+    id: text(row.id),
+    name: text(row.name),
+    root: text(row.root),
+    valid: typeof valid === "boolean" ? valid : null,
+    error: text(row.error),
+    modules: textList(row.modules),
+    counts: {
+      sources: integer(counts.sources),
+      testpoints: integer(counts.testpoints),
+      cases: integer(counts.cases),
+    },
+  };
+}
+
+function normalizeTraceCoverageBlock(value: unknown): QaTraceCoverageBlock {
+  const row = isRecord(value) ? value : {};
+  return {
+    label: text(row.label),
+    types: textList(row.types),
+    reviewed: normalizeTraceRatio(row.reviewed),
+    current_valid: normalizeTraceRatio(row.current_valid),
+    uncovered: textList(row.uncovered),
+    unconfirmed_sources: textList(row.unconfirmed_sources),
+  };
+}
+
+function normalizeTraceCoverage(value: unknown): QaTraceCoverage | null {
+  if (!isRecord(value)) return null;
+  const automation = isRecord(value.automation) ? value.automation : {};
+  const orphan = isRecord(value.orphan) ? value.orphan : {};
+  return {
+    requirement: normalizeTraceCoverageBlock(value.requirement),
+    behavior: normalizeTraceCoverageBlock(value.behavior),
+    automation: {
+      label: text(automation.label, "automation") || "automation",
+      reviewed: normalizeTraceRatio(automation.reviewed),
+      provisional: automation.provisional !== false,
+      provisional_reason: text(automation.provisional_reason),
+      unresolved_scripts: textList(automation.unresolved_scripts),
+    },
+    orphan: {
+      label: text(orphan.label, "orphan") || "orphan",
+      library: normalizeTraceRatio(orphan.library),
+      case_ids: textList(orphan.case_ids),
+    },
+  };
+}
+
+function normalizeTraceRecheck(value: unknown): QaTraceRecheck {
+  const row = isRecord(value) ? value : {};
+  // The report's P1 re-check list carries `{source_id, reason}` objects; the
+  // P3 stale list carries plain strings. Both collapse to readable strings.
+  const reasons = Array.isArray(row.reasons)
+    ? row.reasons.map((entry) => {
+        if (isRecord(entry)) {
+          const reason = text(entry.reason);
+          const sourceId = text(entry.source_id);
+          return sourceId ? `${reason}:${sourceId}` : reason;
+        }
+        return text(entry);
+      }).filter(Boolean)
+    : [];
+  return {
+    case_id: text(row.case_id),
+    reasons,
+    changed_ids: textList(row.changed_ids),
+    reviewed_by: text(row.reviewed_by) || null,
+  };
+}
+
+function normalizeTraceDiagnostic(value: unknown): QaTraceDiagnostic {
+  const row = isRecord(value) ? value : {};
+  return {
+    severity: text(row.severity, "info") || "info",
+    code: text(row.code),
+    entity_id: text(row.entity_id) || null,
+    path: text(row.path) || null,
+    field: text(row.field) || null,
+    message: text(row.message),
+    suggestion: text(row.suggestion) || null,
+  };
+}
+
+function normalizeTraceStaleBlock(value: unknown): QaTraceStaleBlock | null {
+  if (!isRecord(value)) return null;
+  return {
+    error: text(value.error),
+    baseline: text(value.baseline),
+    counts: numberRecord(value.counts),
+    needs_recheck: Array.isArray(value.needs_recheck)
+      ? value.needs_recheck.map(normalizeTraceRecheck)
+      : [],
+  };
+}
+
+function normalizeTraceDraftsBlock(value: unknown): QaTraceDraftsBlock | null {
+  if (!isRecord(value)) return null;
+  return {
+    error: text(value.error),
+    counts: numberRecord(value.counts),
+    batches: textList(value.batches),
+  };
+}
+
+function normalizeTraceRunsBlock(value: unknown): QaTraceRunsBlock | null {
+  if (!isRecord(value)) return null;
+  return { error: text(value.error), counts: numberRecord(value.counts) };
+}
+
+function normalizeTraceSummary(value: unknown): QaTraceSummary {
+  const row = isRecord(value) ? value : {};
+  const gaps = isRecord(row.requirement_gaps) ? row.requirement_gaps : null;
+  const dead = isRecord(row.dead_assets) ? row.dead_assets : null;
+  const manualP0 = dead && isRecord(dead.manual_p0_cases) ? dead.manual_p0_cases : {};
+  const diagnostics = isRecord(row.diagnostics) ? row.diagnostics : {};
+  return {
+    project: normalizeTraceProjectRef(row.project),
+    valid: row.valid === true,
+    counts: numberRecord(row.counts),
+    coverage: normalizeTraceCoverage(row.coverage),
+    requirement_gaps: gaps
+      ? {
+          uncovered_requirements: textList(gaps.uncovered_requirements),
+          cases_without_requirement_root: textList(gaps.cases_without_requirement_root),
+          count: integer(gaps.count),
+          uncovered_requirement_count: integer(gaps.uncovered_requirement_count),
+        }
+      : null,
+    dangling_count: integer(row.dangling_count),
+    dead_assets: dead
+      ? {
+          sources_without_downstream: textList(dead.sources_without_downstream),
+          deprecated_cases: textList(dead.deprecated_cases),
+          manual_p0_cases: {
+            status: text(manualP0.status, "unknown") || "unknown",
+            candidates: textList(manualP0.candidates),
+          },
+          count: integer(dead.count),
+        }
+      : null,
+    metrics_suppressed: text(row.metrics_suppressed),
+    diagnostics: {
+      counts: numberRecord(diagnostics.counts),
+      items: Array.isArray(diagnostics.items)
+        ? diagnostics.items.map(normalizeTraceDiagnostic)
+        : [],
+    },
+    stale: normalizeTraceStaleBlock(row.stale),
+    drafts: normalizeTraceDraftsBlock(row.drafts),
+    runs: normalizeTraceRunsBlock(row.runs),
+  };
+}
+
+function normalizeTraceScriptRef(value: unknown): QaTraceScriptRef | null {
+  if (!isRecord(value)) return null;
+  return {
+    case_id: text(value.case_id),
+    binding: text(value.binding),
+    file: text(value.file),
+    nodeid: text(value.nodeid),
+    resolves: value.resolves !== false,
+    problem: text(value.problem),
+  };
+}
+
+function normalizeTraceCaseNode(value: unknown): QaTraceCaseNode {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    title: text(row.title),
+    status: text(row.status),
+    priority: text(row.priority),
+    type: text(row.type),
+    automation: text(row.automation),
+    owner: text(row.owner),
+    tags: textList(row.tags),
+    testpoints: textList(row.testpoints),
+    sources: textList(row.sources),
+    script: normalizeTraceScriptRef(row.script),
+    needs_recheck: row.needs_recheck === true,
+    recheck_reasons: textList(row.recheck_reasons),
+    changed_ids: textList(row.changed_ids),
+  };
+}
+
+function normalizeTraceTestPointNode(value: unknown): QaTraceTestPointNode {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    title: text(row.title),
+    status: text(row.status),
+    method: text(row.method),
+    risk: text(row.risk),
+    module: text(row.module),
+    owner: text(row.owner),
+    sources: textList(row.sources),
+    cases: Array.isArray(row.cases) ? row.cases.map(normalizeTraceCaseNode) : [],
+  };
+}
+
+function normalizeTraceSourceNode(value: unknown): QaTraceSourceNode {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    type: text(row.type),
+    title: text(row.title),
+    status: text(row.status),
+    confidence: text(row.confidence),
+    module: text(row.module),
+    owner: text(row.owner),
+    url: text(row.url),
+    app_version: text(row.app_version),
+    observed_at: text(row.observed_at),
+    stale: row.stale === true,
+    evidence: Array.isArray(row.evidence)
+      ? row.evidence.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            type: text(item.type),
+            locator: text(item.locator),
+            description: text(item.description),
+            verified: text(item.verified),
+          };
+        })
+      : [],
+    testpoints: Array.isArray(row.testpoints)
+      ? row.testpoints.map(normalizeTraceTestPointNode)
+      : [],
+    cases: Array.isArray(row.cases) ? row.cases.map(normalizeTraceCaseNode) : [],
+    case_count: integer(row.case_count),
+  };
+}
+
+function normalizeTraceTree(value: unknown): QaTraceTree {
+  const row = isRecord(value) ? value : {};
+  const counts = isRecord(row.counts) ? row.counts : {};
+  return {
+    project: normalizeTraceProjectRef(row.project),
+    counts: {
+      sources: integer(counts.sources),
+      testpoints: integer(counts.testpoints),
+      cases: integer(counts.cases),
+      scripts: integer(counts.scripts),
+      orphans: integer(counts.orphans),
+    },
+    sources: Array.isArray(row.sources) ? row.sources.map(normalizeTraceSourceNode) : [],
+    orphans: Array.isArray(row.orphans) ? row.orphans.map(normalizeTraceCaseNode) : [],
+    scripts: Array.isArray(row.scripts)
+      ? row.scripts.map(normalizeTraceScriptRef).filter((item): item is QaTraceScriptRef => item !== null)
+      : [],
+  };
+}
+
+function normalizeTraceImpact(value: unknown): QaTraceImpact {
+  const row = isRecord(value) ? value : {};
+  const target = isRecord(row.target) ? row.target : {};
+  const counts = isRecord(row.counts) ? row.counts : {};
+  return {
+    target: { id: text(target.id), kind: text(target.kind) },
+    counts: {
+      testpoints: integer(counts.testpoints),
+      cases: integer(counts.cases),
+      scripts: integer(counts.scripts),
+      needs_recheck: integer(counts.needs_recheck),
+    },
+    testpoints: Array.isArray(row.testpoints)
+      ? row.testpoints.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            id: text(item.id),
+            exists: item.exists !== false,
+            title: text(item.title),
+            status: text(item.status),
+            method: text(item.method),
+            risk: text(item.risk),
+          };
+        })
+      : [],
+    cases: Array.isArray(row.cases)
+      ? row.cases.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            id: text(item.id),
+            title: text(item.title),
+            status: text(item.status),
+            priority: text(item.priority),
+            automation: text(item.automation),
+            script: text(item.script),
+            needs_recheck: item.needs_recheck === true,
+            reasons: textList(item.reasons),
+            changed_ids: textList(item.changed_ids),
+            via: Array.isArray(item.via)
+              ? item.via.map((path) => {
+                  const hop = isRecord(path) ? path : {};
+                  return {
+                    source_id: text(hop.source_id),
+                    testpoint_id: text(hop.testpoint_id) || null,
+                  };
+                })
+              : [],
+          };
+        })
+      : [],
+    scripts: Array.isArray(row.scripts)
+      ? row.scripts.map(normalizeTraceScriptRef).filter((item): item is QaTraceScriptRef => item !== null)
+      : [],
+    sources: Array.isArray(row.sources)
+      ? row.sources.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            id: text(item.id),
+            exists: item.exists !== false,
+            type: text(item.type),
+            title: text(item.title),
+            status: text(item.status),
+            confidence: text(item.confidence),
+            stale: typeof item.stale === "boolean" ? item.stale : null,
+          };
+        })
+      : [],
+  };
+}
+
+function normalizeTraceStale(value: unknown): QaTraceStale {
+  const row = isRecord(value) ? value : {};
+  return {
+    baseline: text(row.baseline),
+    written: row.written === true,
+    recorded: integer(row.recorded),
+    index: text(row.index),
+    counts: numberRecord(row.counts),
+    changed: Array.isArray(row.changed)
+      ? row.changed.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            id: text(item.id),
+            kind: text(item.kind),
+            content_changed: item.content_changed === true,
+            dependency_changed: item.dependency_changed === true,
+            in_baseline: item.in_baseline !== false,
+          };
+        })
+      : [],
+    removed: textList(row.removed),
+    needs_recheck: Array.isArray(row.needs_recheck)
+      ? row.needs_recheck.map(normalizeTraceRecheck)
+      : [],
+  };
+}
+
+function normalizeTraceDraft(value: unknown): QaTraceDraft {
+  const row = isRecord(value) ? value : {};
+  return {
+    batch: text(row.batch),
+    id: text(row.id),
+    kind: text(row.kind),
+    path: text(row.path),
+    status: text(row.status, "pending") || "pending",
+    valid: row.valid !== false,
+    problems: textList(row.problems),
+    note: text(row.note),
+    rejected_by: text(row.rejected_by),
+    rejected_at: text(row.rejected_at),
+  };
+}
+
+function normalizeTraceDraftList(value: unknown): QaTraceDraftList {
+  const row = isRecord(value) ? value : {};
+  return {
+    counts: numberRecord(row.counts),
+    batches: textList(row.batches),
+    drafts: Array.isArray(row.drafts) ? row.drafts.map(normalizeTraceDraft) : [],
+  };
+}
+
+function normalizeTraceReviewOutcome(value: unknown): QaTraceReviewOutcome {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    kind: text(row.kind),
+    mode: text(row.mode),
+    path: text(row.path),
+    reviewed_by: text(row.reviewed_by),
+    reviewed_at: text(row.reviewed_at),
+    note: text(row.note),
+    needs_recheck: row.needs_recheck === true,
+  };
+}
+
+function normalizeTraceFailure(value: unknown): QaTraceFailure {
+  const row = isRecord(value) ? value : {};
+  const run = isRecord(row.run) ? row.run : {};
+  const counts = isRecord(row.counts) ? row.counts : {};
+  return {
+    run: {
+      run_id: text(run.run_id),
+      status: text(run.status),
+      exitstatus: nullableNumber(run.exitstatus),
+      started_at: text(run.started_at),
+      finished_at: text(run.finished_at),
+      environment: text(run.environment),
+      code_commit: text(run.code_commit) || null,
+      tool_version: text(run.tool_version),
+      path: text(run.path),
+    },
+    requested_case: text(row.requested_case),
+    case_missing: row.case_missing === true,
+    counts: numberRecord(counts),
+    failures: Array.isArray(row.failures)
+      ? row.failures.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          const chain = isRecord(item.chain) ? item.chain : {};
+          const current = isRecord(item.current) ? item.current : {};
+          const lastRun = isRecord(item.last_run) ? item.last_run : null;
+          return {
+            case_id: text(item.case_id),
+            results: Array.isArray(item.results)
+              ? item.results.map((result) => {
+                  const rowResult = isRecord(result) ? result : {};
+                  return {
+                    nodeid: text(rowResult.nodeid),
+                    attempt: integer(rowResult.attempt, 1),
+                    outcome: text(rowResult.outcome),
+                    failure_stage: text(rowResult.failure_stage),
+                    duration_ms: integer(rowResult.duration_ms),
+                    error_summary: text(rowResult.error_summary),
+                  };
+                })
+              : [],
+            chain: {
+              origin: text(chain.origin),
+              testpoints: Array.isArray(chain.testpoints)
+                ? chain.testpoints.map((testpoint) => {
+                    const itemTestpoint = isRecord(testpoint) ? testpoint : {};
+                    return {
+                      id: text(itemTestpoint.id),
+                      exists: itemTestpoint.exists !== false,
+                      title: text(itemTestpoint.title),
+                      status: text(itemTestpoint.status),
+                    };
+                  })
+                : [],
+              sources: Array.isArray(chain.sources)
+                ? chain.sources.map((source) => {
+                    const itemSource = isRecord(source) ? source : {};
+                    return {
+                      id: text(itemSource.id),
+                      exists: itemSource.exists !== false,
+                      type: text(itemSource.type),
+                      status: text(itemSource.status),
+                      confidence: text(itemSource.confidence),
+                      stale:
+                        typeof itemSource.stale === "boolean" ? itemSource.stale : null,
+                    };
+                  })
+                : [],
+            },
+            current: {
+              exists: current.exists !== false,
+              status: text(current.status),
+              changed_since_run:
+                typeof current.changed_since_run === "boolean"
+                  ? current.changed_since_run
+                  : null,
+              needs_recheck: current.needs_recheck === true,
+              reasons: textList(current.reasons),
+              changed_ids: textList(current.changed_ids),
+            },
+            last_run: lastRun
+              ? {
+                  run_id: text(lastRun.run_id),
+                  outcome: text(lastRun.outcome),
+                  finished_at: text(lastRun.finished_at),
+                }
+              : null,
+          };
+        })
+      : [],
+  };
+}
+
+function normalizeTraceRunList(value: unknown): QaTraceRunList {
+  const row = isRecord(value) ? value : {};
+  return {
+    counts: numberRecord(row.counts),
+    items: Array.isArray(row.items)
+      ? row.items.map((entry) => {
+          const item = isRecord(entry) ? entry : {};
+          return {
+            run_id: text(item.run_id),
+            status: text(item.status),
+            exitstatus: nullableNumber(item.exitstatus),
+            started_at: text(item.started_at),
+            finished_at: text(item.finished_at),
+            environment: text(item.environment),
+            app_version: text(item.app_version),
+            code_commit: text(item.code_commit) || null,
+            tool_version: text(item.tool_version),
+            path: text(item.path),
+            results: integer(item.results),
+            failed_cases: integer(item.failed_cases),
+            failed_case_ids: textList(item.failed_case_ids),
+          };
+        })
+      : [],
+  };
+}
+
+export interface QaTraceProjectQuery {
+  /** Project directory name; omitted lets the backend pick the first one. */
+  project?: string;
+}
+
+export interface QaTraceImpactQuery extends QaTraceProjectQuery {
+  source?: string;
+  testpoint?: string;
+  case?: string;
+}
+
+export interface QaTraceFailureQuery extends QaTraceProjectQuery {
+  run: string;
+  case?: string;
+}
+
+export interface QaTraceReviewInput extends QaTraceProjectQuery {
+  id: string;
+  batch?: string;
+  reviewer?: string;
+  note?: string;
+}
+
+export async function loadQaTraceProjects(token: string): Promise<QaTraceProject[]> {
+  const payload = await request<RawRecord>("/api/qa/trace/projects", token);
+  return Array.isArray(payload.projects) ? payload.projects.map(normalizeTraceProject) : [];
+}
+
+export async function loadQaTraceSummary(
+  token: string,
+  query: QaTraceProjectQuery = {},
+): Promise<QaTraceSummary> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/summary${qaQuery({ project: query.project })}`,
+    token,
+  );
+  return normalizeTraceSummary(payload);
+}
+
+export async function loadQaTraceTree(
+  token: string,
+  query: QaTraceProjectQuery = {},
+): Promise<QaTraceTree> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/tree${qaQuery({ project: query.project })}`,
+    token,
+  );
+  return normalizeTraceTree(payload);
+}
+
+export async function loadQaTraceImpact(
+  token: string,
+  query: QaTraceImpactQuery = {},
+): Promise<QaTraceImpact> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/impact${qaQuery({
+      project: query.project,
+      source: query.source,
+      testpoint: query.testpoint,
+      case: query.case,
+    })}`,
+    token,
+  );
+  return normalizeTraceImpact(payload);
+}
+
+export async function loadQaTraceStale(
+  token: string,
+  query: QaTraceProjectQuery = {},
+): Promise<QaTraceStale> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/stale${qaQuery({ project: query.project })}`,
+    token,
+  );
+  return normalizeTraceStale(payload);
+}
+
+export async function loadQaTraceDrafts(
+  token: string,
+  query: QaTraceProjectQuery & { batch?: string } = {},
+): Promise<QaTraceDraftList> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/drafts${qaQuery({ project: query.project, batch: query.batch })}`,
+    token,
+  );
+  return normalizeTraceDraftList(payload);
+}
+
+export async function loadQaTraceFailure(
+  token: string,
+  query: QaTraceFailureQuery,
+): Promise<QaTraceFailure> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/failure${qaQuery({
+      project: query.project,
+      run: query.run,
+      case: query.case,
+    })}`,
+    token,
+  );
+  return normalizeTraceFailure(payload);
+}
+
+export async function loadQaTraceRuns(
+  token: string,
+  query: QaTraceProjectQuery = {},
+): Promise<QaTraceRunList> {
+  const payload = await request<RawRecord>(
+    `/api/qa/trace/runs${qaQuery({ project: query.project })}`,
+    token,
+  );
+  return normalizeTraceRunList(payload);
+}
+
+/**
+ * Record the current fingerprints as the new stale baseline (`qa.trace.stale_write`).
+ *
+ * This is the "记录基线" action: it answers "what changed since I last looked".
+ * It never approves anything — clearing `needs_recheck` is a review decision.
+ */
+export async function writeQaTraceBaseline(
+  transport: QaMutationTransport,
+  project?: string,
+): Promise<QaTraceStale> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.trace.stale_write",
+    compactPayload({ project }),
+  );
+  return readEntity(payload, "stale", normalizeTraceStale);
+}
+
+/** Promote one draft, or re-review one formal test point/case. */
+export async function approveQaTraceReview(
+  transport: QaMutationTransport,
+  input: QaTraceReviewInput,
+): Promise<QaTraceReviewOutcome> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.trace.review_approve",
+    compactPayload({ ...input }),
+  );
+  return readEntity(payload, "review", normalizeTraceReviewOutcome);
+}
+
+/** Record the rejection of one draft; the file stays in `draft/`. */
+export async function rejectQaTraceReview(
+  transport: QaMutationTransport,
+  input: QaTraceReviewInput,
+): Promise<QaTraceReviewOutcome> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.trace.review_reject",
+    compactPayload({ ...input }),
+  );
+  return readEntity(payload, "review", normalizeTraceReviewOutcome);
+}

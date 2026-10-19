@@ -1,0 +1,15 @@
+schema_version: 1
+id: TC-LOGIN-002
+module: LOGIN
+title: 错误提示文案可判定
+testpoints:
+  - TP-LOGIN-002
+priority: P2
+type: functional
+status: reviewed
+steps:
+  - action: 输入错误密码一次
+    expected: 提示文案 = “用户名或密码错误”，剩余次数 = 4
+automation:
+  status: manual
+owner: qa.zhang

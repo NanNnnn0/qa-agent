@@ -1,0 +1,118 @@
+name: qa-trace
+
+# P5 gate (plan section 8): the trace library is validated on every change, the
+# report is uploaded as an artifact, and a pull request is compared with its base
+# commit so a new dangling reference, a new error diagnostic or a coverage drop
+# fails the job.
+#
+# Paths this workflow assumes (same checkout layout as the repository):
+#   qa_trace/                          domain library and the `qa` CLI
+#   qa-workbench/projects/login-lock   demo project used for the gate
+#   tests/qa_trace                     the qa-trace test suite
+# NANOBOT_QA_TRACE_ROOT only feeds the workbench adapter
+# (nanobot/qa/trace_api.py); every CLI call below passes an explicit --project
+# path, so the gate does not depend on the adapter root.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "qa_trace/**"
+      - "qa-workbench/**"
+      - "tests/qa_trace/**"
+      - "pyproject.toml"
+      - ".pre-commit-config.yaml"
+      - ".github/workflows/qa-trace.yml"
+  pull_request:
+    paths:
+      - "qa_trace/**"
+      - "qa-workbench/**"
+      - "tests/qa_trace/**"
+      - "pyproject.toml"
+      - ".pre-commit-config.yaml"
+      - ".github/workflows/qa-trace.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: qa-trace-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    name: Trace library
+    runs-on: ubuntu-latest
+    env:
+      NANOBOT_QA_TRACE_ROOT: ${{ github.workspace }}/qa-workbench/projects
+      NANOBOT_SKIP_WEBUI_BUILD: "1"
+      QA_PROJECT: qa-workbench/projects/login-lock
+    steps:
+      - name: Check out (full history for --base)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package
+        run: |
+          python -m pip install --upgrade pip
+          # Editable install: the hatch build hook skips the WebUI bundle in
+          # editable mode, and the install creates the `qa` entry point declared
+          # in pyproject.toml.
+          pip install -e ".[dev]"
+
+      - name: Resolve the CLI entry point
+        run: |
+          if command -v qa >/dev/null 2>&1; then
+            echo "QA_CLI=qa" >> "$GITHUB_ENV"
+          else
+            # `pip install -e .` normally provides `qa`; `python -m qa_trace` is
+            # the same CLI when the entry point is missing (see pyproject.toml).
+            echo "QA_CLI=python -m qa_trace" >> "$GITHUB_ENV"
+          fi
+
+      - name: Unit tests
+        run: python -m pytest tests/qa_trace -q
+
+      - name: Fast check on the demo project
+        run: $QA_CLI trace check --project "$QA_PROJECT"
+
+      - name: Report (JSON artifact)
+        run: $QA_CLI trace report --project "$QA_PROJECT" --json > qa-trace-report.json
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-trace-report
+          path: qa-trace-report.json
+          if-no-files-found: error
+
+      # Exit 0: no regression. Exit 1: new error / dangling reference / orphan,
+      # or a coverage drop beyond the tolerance. Exit 2: not a git work tree,
+      # unknown ref, or the project is missing at that ref. Any non-zero value
+      # fails the job; the JSON is printed for the job log on 1, and on 2 the
+      # artifact holds the input diagnostic instead of JSON.
+      - name: Diff against the pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: |
+          set +e
+          $QA_CLI trace diff --project "$QA_PROJECT" --base "$BASE_REF" --json > qa-trace-diff.json
+          status=$?
+          cat qa-trace-diff.json
+          exit $status
+
+      - name: Upload the diff
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-trace-diff
+          path: qa-trace-diff.json
+          if-no-files-found: warn

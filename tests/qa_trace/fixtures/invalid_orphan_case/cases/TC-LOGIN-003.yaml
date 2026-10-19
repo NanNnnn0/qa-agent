@@ -1,0 +1,15 @@
+schema_version: 1
+id: TC-LOGIN-003
+module: LOGIN
+title: 挂在不存在的测试点上
+testpoints:
+  - TP-LOGIN-404
+priority: P1
+type: functional
+status: reviewed
+steps:
+  - action: 连续输错密码 5 次
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: manual
+owner: qa.zhang

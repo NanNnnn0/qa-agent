@@ -116,6 +116,12 @@ dev = [
 [project.scripts]
 nanobot = "nanobot.cli.entry:main"
 nanobot-desktop-tui = "nanobot.cli.desktop_tui:main"
+qa = "qa_trace.cli:main"
+
+# The qa-trace pytest plugin: validates @pytest.mark.case IDs and records run
+# manifests.  It is inert unless --qa-project / --qa-run-dir is passed.
+[project.entry-points.pytest11]
+qa_trace = "qa_trace.pytest_plugin"
 
 # Third-party tool plugins register here.  Built-in tools are discovered
 # automatically via pkgutil scanning in ToolLoader.discover().
@@ -141,6 +147,7 @@ include = [
     "nanobot/skills/**/*.sh",
     "nanobot/channels/*/webui/**/*",
     "nanobot/web/dist/**/*",
+    "qa_trace/**/*.py",
 ]
 # nanobot/web/dist/ is produced by `cd webui && bun run build` and is
 # git-ignored. List it as an artifact so hatch ships it in both wheel and
@@ -150,7 +157,7 @@ artifacts = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanobot", "qa_trace"]
 exclude = ["nanobot/channels/*/tests/**"]
 
 [tool.hatch.build.targets.wheel.sources]
@@ -161,6 +168,7 @@ include = [
     "docs/**/*.md",
     "nanobot/",
     "nanobot/web/dist/",
+    "qa_trace/",
     "hatch_build.py",
     "README.md",
     "LICENSE",

@@ -14,6 +14,11 @@ import certifi
 import pytest
 from loguru import logger
 
+# ``pytester`` is not loaded by default.  Enabling it at the top level keeps the
+# declaration legal (pytest refuses ``pytest_plugins`` in nested conftest files)
+# and lets the qa-trace plugin tests drive nested pytest sessions.
+pytest_plugins = ["pytester"]
+
 
 @pytest.fixture(autouse=True)
 def _isolate_tokenizer_warmup(monkeypatch: pytest.MonkeyPatch) -> None:

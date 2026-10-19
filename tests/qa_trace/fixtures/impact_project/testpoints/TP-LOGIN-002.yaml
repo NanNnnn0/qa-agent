@@ -1,0 +1,10 @@
+schema_version: 1
+id: TP-LOGIN-002
+module: LOGIN
+title: 错误提示文案
+sources:
+  - REQ-LOGIN-01
+method: equivalence
+risk: medium
+status: reviewed
+owner: qa.zhang

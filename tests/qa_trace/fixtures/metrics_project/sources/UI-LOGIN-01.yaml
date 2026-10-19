@@ -1,0 +1,16 @@
+schema_version: 1
+id: UI-LOGIN-01
+type: ui
+module: LOGIN
+title: 登录页错误提示与剩余次数
+evidence:
+  - type: ui_capture
+    locator: artifacts/ui/login-error.png
+    description: 错误提示与剩余次数截图
+    verified: verified_local
+url: /login
+app_version: 3.4.1
+observed_at: 2026-10-18
+confidence: confirmed
+status: active
+owner: qa.zhang

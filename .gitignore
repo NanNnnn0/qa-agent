@@ -57,6 +57,9 @@ htmlcov/
 coverage.xml
 *.cover
 
+# qa-trace derived index (rebuildable from the YAML library and run manifests)
+.qa-trace/
+
 # Lock files (project policy)
 poetry.lock
 uv.lock

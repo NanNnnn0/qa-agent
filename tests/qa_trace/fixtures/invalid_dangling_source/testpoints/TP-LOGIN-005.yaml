@@ -1,0 +1,10 @@
+schema_version: 1
+id: TP-LOGIN-005
+module: LOGIN
+title: 引用了不存在的 UI 来源
+sources:
+  - UI-LOGIN-404
+method: boundary
+risk: high
+status: reviewed
+owner: qa.zhang

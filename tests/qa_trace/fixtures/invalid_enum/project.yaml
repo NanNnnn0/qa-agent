@@ -1,0 +1,3 @@
+schema_version: 1
+project_id: bad-enum
+name: Invalid fixture - priority outside P0-P3

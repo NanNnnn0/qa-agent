@@ -1,0 +1,14 @@
+schema_version: 1
+id: TC-LOGIN-004
+title: 第一步没有写预期结果
+testpoints:
+  - TP-LOGIN-005
+priority: P1
+type: functional
+status: draft
+steps:
+  - action: 输入 qa01 与错误密码后提交
+  - action: 重复提交至第 5 次
+    expected: HTTP 状态码 423
+automation:
+  status: manual

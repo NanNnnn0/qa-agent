@@ -1,0 +1,10 @@
+schema_version: 1
+id: UI-LOGIN-02
+type: ui
+module: LOGIN
+title: 登录失败 5 次触发账号锁定
+url: /login
+app_version: 3.4.1
+observed_at: 2026-10-18
+confidence: observed
+owner: qa.zhang

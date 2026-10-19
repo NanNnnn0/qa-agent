@@ -1,0 +1,17 @@
+schema_version: 1
+id: TC-LOGIN-004
+module: LOGIN
+title: 锁定期间的登录提示
+testpoints:
+  - TP-LOGIN-005
+priority: P2
+type: functional
+status: reviewed
+steps:
+  - action: 账号锁定期间再次提交正确密码
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: manual
+owner: qa.li
+tags:
+  - login

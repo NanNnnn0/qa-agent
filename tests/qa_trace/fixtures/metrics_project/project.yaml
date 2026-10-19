@@ -1,0 +1,7 @@
+schema_version: 1
+project_id: metrics-demo
+name: Metrics fixture - exact known numbers
+modules:
+  - LOGIN
+thresholds:
+  p0_ratio_max: 0.2

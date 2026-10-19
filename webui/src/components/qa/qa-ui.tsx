@@ -257,12 +257,17 @@ export function QaProgress({ value, className }: { value: number; className?: st
 export function QaPanel({
   children,
   className,
+  testId,
 }: {
   children: ReactNode;
   className?: string;
+  testId?: string;
 }) {
   return (
-    <div className={cn("overflow-hidden rounded-lg border border-border/60 bg-card", className)}>
+    <div
+      data-testid={testId}
+      className={cn("overflow-hidden rounded-lg border border-border/60 bg-card", className)}
+    >
       {children}
     </div>
   );

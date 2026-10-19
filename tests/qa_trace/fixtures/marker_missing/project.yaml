@@ -1,0 +1,5 @@
+schema_version: 1
+project_id: marker-missing
+name: P2 marker lint fixture - script lost its marker
+modules:
+  - LOGIN

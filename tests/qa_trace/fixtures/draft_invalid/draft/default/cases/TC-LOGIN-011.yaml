@@ -1,0 +1,11 @@
+schema_version: 1
+id: TC-LOGIN-011
+module: LOGIN
+title: 缺 steps 的坏草稿
+testpoints:
+  - TP-LOGIN-005
+priority: P1
+type: functional
+status: draft
+automation:
+  status: manual

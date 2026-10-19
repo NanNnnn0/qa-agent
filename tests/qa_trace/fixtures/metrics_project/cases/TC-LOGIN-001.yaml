@@ -1,0 +1,20 @@
+schema_version: 1
+id: TC-LOGIN-001
+module: LOGIN
+title: 密码连续错误 5 次锁定账号
+testpoints:
+  - TP-LOGIN-001
+priority: P1
+type: functional
+status: reviewed
+steps:
+  - action: 输入 qa01 与错误密码后提交
+    expected: 提示“用户名或密码错误”，剩余尝试次数显示 4
+  - action: 重复提交至第 5 次
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: done
+  script: scripts/test_login.py::test_lock_after_5_failures
+owner: qa.zhang
+tags:
+  - login

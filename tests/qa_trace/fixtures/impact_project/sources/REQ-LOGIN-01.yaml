@@ -1,0 +1,13 @@
+schema_version: 1
+id: REQ-LOGIN-01
+type: req
+module: LOGIN
+title: 连续失败 5 次锁定账号
+evidence:
+  - type: document
+    locator: docs/req-login.md#lock
+    description: 需求文档 3.4 节
+    verified: verified_local
+confidence: confirmed
+status: active
+owner: qa.zhang

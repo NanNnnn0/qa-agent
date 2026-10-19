@@ -1,0 +1,10 @@
+schema_version: 1
+id: TP-LOGIN-005
+module: LOGIN
+title: 连续失败计数与锁定阈值
+sources:
+  - UI-LOGIN-02
+method: boundary
+risk: high
+status: reviewed
+owner: qa.zhang

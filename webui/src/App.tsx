@@ -2116,6 +2116,15 @@ function Shell({
     [activeKey, navigate, sidebarState.archived_keys, topicSessions, updateSidebarState],
   );
 
+  const setSessionArchived = useCallback(
+    (key: string, archived: boolean) => {
+      // Archiving a dispatch row must mirror onto its chat exactly once.
+      if (sidebarState.archived_keys.includes(key) === archived) return;
+      onToggleArchive(key);
+    },
+    [onToggleArchive, sidebarState.archived_keys],
+  );
+
   const onToggleArchived = useCallback(() => {
     void updateSidebarState((current) => ({
       ...current,
@@ -2872,6 +2881,8 @@ function Shell({
         onOpenSession={onSelectChat}
         onGoHome={onNewChat}
         homeActionRef={dispatchHomeRef}
+        sessions={topicSessions}
+        onArchiveSession={setSessionArchived}
       >
       <StarPrompt ready={localActive && !managingConnections && !loading && !sidebarStateLoading} />
       <div

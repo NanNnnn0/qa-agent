@@ -1,0 +1,17 @@
+schema_version: 1
+id: TC-LOGIN-003
+module: LOGIN
+title: 锁定提示文案回归
+sources:
+  - UI-LOGIN-01
+direct_reason: 回归补充用例，无独立测试点
+risk: high
+priority: P2
+type: ui
+status: reviewed
+steps:
+  - action: 第 5 次错误后观察提示
+    expected: 提示文案包含“15 分钟”，页面元素 #lock-timer 可见
+automation:
+  status: manual
+owner: qa.li

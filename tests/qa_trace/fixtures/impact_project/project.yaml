@@ -1,0 +1,5 @@
+schema_version: 1
+project_id: impact-demo
+name: Impact fixture - multi-path graph
+modules:
+  - LOGIN
