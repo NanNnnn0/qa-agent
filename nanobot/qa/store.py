@@ -29,6 +29,7 @@ from nanobot.qa.validation import (
     TASK_ROLES,
     TASK_STATUSES,
     QaConflictError,
+    QaError,
     QaNotFoundError,
     QaValidationError,
     normalize_api_operation,
@@ -1626,6 +1627,40 @@ class QaStore:
         workflow = self._row_to_workflow(row)
         workflow["candidate_count"] = len(workflow["candidates"])
         return workflow
+
+    def validate_api_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Report what applying the batch would do, without writing anything."""
+        workflow = self.get_api_workflow(workflow_id)
+        project = self._require_project(workflow["project_id"])
+        prepared: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for index, candidate in enumerate(workflow["candidates"]):
+            try:
+                item = self._prepare_candidate(project, candidate)
+            except QaError as exc:
+                errors.append(f"candidates[{index}]: {exc}")
+                continue
+            operation = item["operation"]
+            prepared.append({
+                "index": index,
+                "title": item["row"]["title"],
+                "code": item["row"]["code"],
+                "scenario_key": item["scenario_key"],
+                "operation_id": operation["id"] if operation is not None else "",
+                "operation": (
+                    f"{operation['method']} {operation['path']}"
+                    if operation is not None else ""
+                ),
+                "action": "update" if item["existing_case_id"] else "create",
+                "case_id": item["existing_case_id"] or "",
+            })
+        return {
+            "workflow_id": workflow_id,
+            "status": workflow["status"],
+            "candidates": prepared,
+            "errors": errors,
+            "ok": not errors and len(prepared) == len(workflow["candidates"]),
+        }
 
     def replace_api_workflow_candidates(
         self, workflow_id: str, candidates: Any,

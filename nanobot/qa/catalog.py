@@ -9,6 +9,7 @@ material twice produces the same identity and the same content hashes.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,17 @@ def load_document(payload: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise QaValidationError("document must parse to a JSON object")
     return parsed
+
+
+def configured_roots() -> list[str]:
+    """Reference roots the caller may read, from ``NANOBOT_QA_SPEC_ROOTS``.
+
+    The variable holds ``os.pathsep``-separated directories. An empty result means
+    no local reference may be read at all, so a path-based ingest fails loudly
+    instead of reading whatever the process can reach.
+    """
+    raw = os.environ.get("NANOBOT_QA_SPEC_ROOTS", "")
+    return [item.strip() for item in raw.split(os.pathsep) if item.strip()]
 
 
 def read_local_source(path: str, *, allowed_roots: Iterable[str]) -> tuple[str, dict[str, str]]:

@@ -42,3 +42,4 @@ Each alternative with the reason it lost. This is the part that saves the next s
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
 | [0002](0002-api-asset-workflow.md) | Store API reference assets as catalog rows, revisions and batches | accepted |
+| [0003](0003-api-asset-tools.md) | Expose the API asset workflow as MCP tools and move the role protocol onto it | accepted |

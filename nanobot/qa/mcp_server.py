@@ -22,6 +22,7 @@ from nanobot.agent.tools.qa import (
     QaScriptTool,
     QaTaskTool,
 )
+from nanobot.qa.api_tools import api_tools
 
 try:  # pragma: no cover - import shape depends on the installed mcp version
     import mcp.types as types
@@ -43,6 +44,7 @@ def _instances() -> dict[str, Any]:
             QaScriptTool(),
             QaRunTool(),
             QaTaskTool(None),
+            *api_tools(),
         )
     }
 
