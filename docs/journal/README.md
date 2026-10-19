@@ -30,6 +30,7 @@ Notes are listed newest first. Update this table in the same commit that adds a 
 
 | Date | Slug | Summary |
 |---|---|---|
+| 2026-10-18 | [webui-empty-state](2026-10-18-webui-empty-state.md) | Blank-start assertions retargeted to the workbench pane; full WebUI suite gated |
 | 2026-10-18 | [gate-hardening](2026-10-18-gate-hardening.md) | Runner pinned, event filters unified, pre-push hook; WebUI failure root cause; qa-trace work found uncommitted |
 | 2026-10-18 | [ci-gate](2026-10-18-ci-gate.md) | CI gate wired to the remote; upstream suite disabled; WebUI QA suite gated |
 | 2026-10-18 | [docs-skeleton](2026-10-18-docs-skeleton.md) | Git baseline, collaboration contract, deploy and status docs |

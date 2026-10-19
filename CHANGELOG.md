@@ -23,6 +23,10 @@ History begins on 2026-10-18, when the deployed tree was placed under version co
 - `AGENTS.md`: routes sessions to the collaboration contract and the status page.
 - `.venv`: installed `pytest-asyncio` and `ruff`, which the merge gate requires and the deployed environment lacked; `tests/qa` went from 26 environment failures to 83 passed.
 
+### Fixed
+
+- WebUI tests: seven assertions still expected the hero greeting on the blank start page, which was removed in favour of the workbench pane, and two expected a `Back to chat` control that settings and apps no longer render when no chat is mounted. They now assert `workbench-pane-new-topic` and wait for boot; the full WebUI suite (2797 tests) passes, and CI runs it instead of the QA-only subset.
+
 ## [0.3.5] - baseline
 
 The deployed state captured on 2026-10-18: `nanobot_ai` 0.3.5 installed editable in `/opt/qa-agent/.venv`, served by `qa-agent.service` behind nginx on port 8443, with the QA work platform (`nanobot/qa/`, `/api/qa/*`, QA skills, QA workbench) present.

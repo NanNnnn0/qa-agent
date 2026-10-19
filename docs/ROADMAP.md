@@ -23,7 +23,7 @@ Exit condition: the commands in `COLLABORATION.md` run green on a clean checkout
 - [x] Confirm the gate runs green on `main` (2026-10-18, runs 39128233554 and 39128813135)
 - [x] Pin the runner to `ubuntu-24.04` and apply the same documentation-only filter to push and pull request
 - [x] Add `scripts/hooks/pre-push` so the gate runs locally before a push
-- [ ] Decide whether the blank start page is intended to show the hero greeting: the current composition renders `PaneWorkbench` instead, which is what breaks seven assertions in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx`. Update the tests or fix the composition, then gate the full suite.
+- [x] Owner confirmed the blank start page no longer shows the hero greeting: retargeted the seven stale assertions to `workbench-pane-new-topic`, removed `HERO_GREETING_PATTERN`, and gated the full WebUI suite (2797 tests, green twice in a row on 2026-10-18)
 
 ## M2 - Documentation truth pass
 
