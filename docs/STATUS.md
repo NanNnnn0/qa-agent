@@ -23,6 +23,8 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
+
+CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 7m57s. The same WebUI suite takes 170s on this 6-vCPU host, so budget roughly three times the local run for CI; the webui job is capped at 15 minutes.
 | Full suite | `.venv/bin/python -m pytest -q` | never run on this host |
 
 `pytest-asyncio` and `ruff` were missing from `.venv` and were installed on 2026-10-18. Before that, 26 async tests failed with `async def functions are not natively supported` and `ruff` did not exist. Both were missing dev dependencies, not product defects. A new checkout needs them before the gate means anything.
