@@ -12,22 +12,11 @@ from xml.parsers.expat import ExpatError
 
 from defusedxml import ElementTree
 
-from nanobot.qa.runner import CaseRunner
+from nanobot.qa.runner import ENVIRONMENT_ERROR_MARKERS, CaseRunner
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import QaValidationError
 
 MAX_CASES_PER_RUN = 200
-
-_ENVIRONMENT_ERROR_MARKERS = (
-    "ConnectError",
-    "ConnectTimeout",
-    "ReadTimeout",
-    "ReadError",
-    "RemoteProtocolError",
-    "NetworkError",
-    "NameResolutionError",
-    "Connection refused",
-)
 
 
 def _all_environment_errors(tests: list[dict[str, Any]]) -> bool:
@@ -42,7 +31,7 @@ def _all_environment_errors(tests: list[dict[str, Any]]) -> bool:
     if len(errored) != len(tests):
         return False
     return all(
-        any(marker in str(test.get("message", "")) for marker in _ENVIRONMENT_ERROR_MARKERS)
+        any(marker in str(test.get("message", "")) for marker in ENVIRONMENT_ERROR_MARKERS)
         for test in errored
     )
 

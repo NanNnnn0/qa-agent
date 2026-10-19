@@ -101,6 +101,17 @@ def test_import_export_round_trip(store: QaStore, project: dict) -> None:
     assert again["skipped"]
 
 
+def test_export_is_complete_beyond_the_page_cap(store: QaStore, project: dict) -> None:
+    for index in range(510):
+        store.create_case(project["id"], title=f"case {index:03d}", kind="api")
+    exported = store.export_cases(project["id"])
+    assert exported["total"] == 510
+    assert len(exported["cases"]) == 510
+    # The paged listing keeps its own cap; only the export is complete.
+    assert len(store.list_cases(project_id=project["id"], limit=500)["items"]) == 500
+    assert store.list_cases(project_id=project["id"], limit=500)["total"] == 510
+
+
 def test_scripts_crud(store: QaStore, project: dict) -> None:
     script = store.create_script(
         project["id"], name="smoke", content="print('x')", file_path="tests/test_x.py",

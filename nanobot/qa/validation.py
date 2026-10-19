@@ -27,7 +27,16 @@ RUN_TRIGGERS = ("manual", "ci", "agent", "schedule")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 
 ASSERTION_TYPES = ("status", "json_path", "header", "response_time_ms", "body_contains")
+EXTRACT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 ASSERTION_OPS = ("equals", "exists", "contains", "gt", "lt", "matches")
+
+# Provenance of a case revision. `create` and `edit` cover the existing editor
+# and tool paths, `import` covers payload imports and `workflow` a batch apply.
+CASE_REVISION_SOURCES = ("create", "edit", "import", "workflow")
+OPERATION_STATUSES = ("active", "missing")
+EVIDENCE_KINDS = ("openapi", "markdown", "source", "spec")
+SCENARIO_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_PATH_PARAM_RE = re.compile(r"\{[^/{}]+\}")
 
 
 class QaError(Exception):
@@ -210,6 +219,23 @@ def validate_api_spec(api: Any) -> dict[str, Any]:
         "assertions": normalized_assertions,
         "variables": _string_map(api.get("variables"), "api.variables"),
     }
+    extract = api.get("extract")
+    if extract is not None:
+        if not isinstance(extract, dict):
+            raise QaValidationError("api.extract must be a JSON object")
+        normalized_extract: dict[str, str] = {}
+        for name, path_value in extract.items():
+            if not isinstance(name, str) or not EXTRACT_NAME_RE.match(name):
+                raise QaValidationError(
+                    "api.extract keys must be identifiers, e.g. order_id"
+                )
+            if not isinstance(path_value, str) or not path_value.startswith("$"):
+                raise QaValidationError(
+                    f"api.extract['{name}'] must be a JSONPath string starting with '$'"
+                )
+            normalized_extract[name] = path_value
+        if normalized_extract:
+            spec["extract"] = normalized_extract
     return spec
 
 
@@ -237,3 +263,132 @@ def validate_steps(steps: Any) -> list[dict[str, str]]:
 
 def case_prefix(project_key: str) -> str:
     return project_key.upper()
+
+
+def require_method(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise QaValidationError("method must be a non-empty string")
+    method = value.strip().upper()
+    if method not in HTTP_METHODS:
+        raise QaValidationError(f"method must be one of {', '.join(HTTP_METHODS)}")
+    return method
+
+
+def normalize_api_path(path: Any) -> str:
+    """Normalize a path template into the catalog's operation identity.
+
+    Path parameter names are cosmetic: ``/orders/{id}`` and ``/orders/{orderId}``
+    name the same endpoint, so both normalize to ``/orders/{}``. A query string or
+    fragment is not part of the identity and is dropped.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise QaValidationError("path must be a non-empty string")
+    text = path.strip().split("?", 1)[0].split("#", 1)[0]
+    if not text.startswith("/"):
+        text = f"/{text}"
+    text = re.sub(r"/{2,}", "/", text)
+    if len(text) > 1:
+        text = text.rstrip("/") or "/"
+    return _PATH_PARAM_RE.sub("{}", text)
+
+
+def normalize_scenario_key(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or not SCENARIO_KEY_RE.match(value.strip()):
+        raise QaValidationError(
+            "scenario_key must start with a lowercase letter and contain 2-64 "
+            "lowercase letters, digits, '_' or '-'"
+        )
+    return value.strip()
+
+
+def normalize_evidence(value: Any) -> list[dict[str, str]]:
+    """Validate evidence references; a reference is useful only when it can be found."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise QaValidationError("evidence must be an array")
+    normalized: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise QaValidationError(f"evidence[{index}] must be an object")
+        kind = item.get("kind")
+        if kind not in EVIDENCE_KINDS:
+            raise QaValidationError(
+                f"evidence[{index}].kind must be one of {', '.join(EVIDENCE_KINDS)}"
+            )
+        ref = item.get("ref")
+        if not isinstance(ref, str) or not ref.strip():
+            raise QaValidationError(f"evidence[{index}].ref is required")
+        entry = {"kind": kind, "ref": ref.strip()}
+        for field, limit in (("version", 200), ("excerpt", 2000)):
+            text = optional_text(item.get(field), f"evidence[{index}].{field}", max_length=limit)
+            if text:
+                entry[field] = text
+        normalized.append(entry)
+    return normalized
+
+
+def normalize_api_operation(payload: Any) -> dict[str, Any]:
+    """Normalize one catalog operation; identity is ``method + normalize_api_path``."""
+    if not isinstance(payload, dict):
+        raise QaValidationError("operation must be a JSON object")
+    template = payload.get("path")
+    if not isinstance(template, str) or not template.strip():
+        raise QaValidationError("path must be a non-empty string")
+    spec = payload.get("spec")
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise QaValidationError("spec must be a JSON object")
+    return {
+        "method": require_method(payload.get("method")),
+        "path": normalize_api_path(template),
+        "path_template": template.strip(),
+        "operation_id": optional_text(payload.get("operation_id"), "operation_id", max_length=200),
+        "summary": optional_text(payload.get("summary"), "summary", max_length=500),
+        "spec": spec,
+        "evidence": normalize_evidence(payload.get("evidence")),
+    }
+
+
+def normalize_case_candidate(payload: Any, index: int = 0) -> dict[str, Any]:
+    """Normalize one candidate of a batch: a case body plus its catalog linkage."""
+    field = f"candidates[{index}]"
+    if not isinstance(payload, dict):
+        raise QaValidationError(f"{field} must be an object")
+    case = payload.get("case")
+    if not isinstance(case, dict):
+        raise QaValidationError(f"{field}.case must be an object")
+    base = payload.get("base_revision")
+    if base is not None and (not isinstance(base, int) or isinstance(base, bool) or base < 1):
+        raise QaValidationError(f"{field}.base_revision must be a positive integer")
+    operation = payload.get("operation")
+    normalized_operation: dict[str, str] | None = None
+    if operation is not None:
+        if not isinstance(operation, dict):
+            raise QaValidationError(f"{field}.operation must be an object")
+        if operation.get("operation_id"):
+            normalized_operation = {
+                "operation_id": require_text(
+                    operation.get("operation_id"), f"{field}.operation.operation_id", max_length=100,
+                )
+            }
+        else:
+            normalized_operation = {
+                "method": require_method(operation.get("method")),
+                "path": normalize_api_path(operation.get("path")),
+            }
+    scenario_key = normalize_scenario_key(payload.get("scenario_key"))
+    if normalized_operation is not None and not scenario_key:
+        raise QaValidationError(
+            f"{field}.scenario_key is required when the candidate targets an operation"
+        )
+    return {
+        "case": case,
+        "operation": normalized_operation,
+        "scenario_key": scenario_key,
+        "evidence": normalize_evidence(payload.get("evidence")),
+        "base_revision": base,
+    }

@@ -16,6 +16,20 @@ TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
 _INDEX_RE = re.compile(r"\[(\d+)\]")
 _KEY_INDEX_RE = re.compile(r"\[\s*['\"]([^'\"]+)['\"]\s*\]")
 
+# A run where every failure is one of these is an environment problem, not a
+# product defect. Both the legacy in-process run and the pinned run classify
+# through this list so a broken host never lands in defect statistics.
+ENVIRONMENT_ERROR_MARKERS = (
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "ReadError",
+    "RemoteProtocolError",
+    "NetworkError",
+    "NameResolutionError",
+    "Connection refused",
+)
+
 
 class CaseExecutionError(ValueError):
     """A case cannot be executed as written."""
@@ -37,6 +51,24 @@ def render(value: Any, variables: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [render(item, variables) for item in value]
     return value
+
+
+def placeholders(value: Any) -> list[str]:
+    """Return every ``{{name}}`` placeholder left in a JSON-like value."""
+    found: list[str] = []
+    if isinstance(value, str):
+        found.extend(match.group(1) for match in TEMPLATE_RE.finditer(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.extend(placeholders(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(placeholders(item))
+    return found
+
+
+def looks_like_environment_error(message: str) -> bool:
+    return any(marker in str(message) for marker in ENVIRONMENT_ERROR_MARKERS)
 
 
 def json_path_tokens(path: str) -> list[str | int]:
@@ -179,8 +211,13 @@ class CaseRunner:
         self.timeout_s = timeout_s
         self.follow_redirects = follow_redirects
 
-    def run_case(self, case: dict[str, Any], variables: dict[str, str] | None = None
-                 ) -> dict[str, Any]:
+    def run_case(
+        self,
+        case: dict[str, Any],
+        variables: dict[str, str] | None = None,
+        *,
+        extract: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         spec = case.get("api") or {}
         request = spec.get("request") or {}
         if not request:
@@ -196,6 +233,17 @@ class CaseRunner:
         merged: dict[str, str] = dict(variables or {})
         merged.update({str(k): str(v) for k, v in (spec.get("variables") or {}).items()})
         request = render(request, merged)
+        unresolved = sorted(set(placeholders(request)))
+        if unresolved:
+            return {
+                "case_id": case.get("id"),
+                "code": case.get("code"),
+                "title": case.get("title"),
+                "status": "error",
+                "duration_ms": 0,
+                "message": "unresolved variable(s): " + ", ".join(unresolved),
+                "checks": [],
+            }
         method = str(request.get("method", "GET")).upper()
         path = str(request.get("path", "/"))
         url = path if path.startswith(("http://", "https://")) else f"{self.base_url}{path}"
@@ -241,6 +289,13 @@ class CaseRunner:
             _check(assertion, response, elapsed_ms, body_json, body_error)
             for assertion in (spec.get("assertions") or [])
         ]
+        extracted: dict[str, Any] = {}
+        if extract and body_json is not None:
+            for name, path in extract.items():
+                try:
+                    extracted[str(name)] = json_path_get(body_json, str(path))
+                except (KeyError, CaseExecutionError):
+                    continue
         passed = all(check.get("passed") for check in checks)
         failed_checks = [check for check in checks if not check.get("passed")]
         message = ""
@@ -250,7 +305,7 @@ class CaseRunner:
                 f"{check.get('actual')!r}"[:300]
                 for check in failed_checks
             )
-        return {
+        result: dict[str, Any] = {
             "case_id": case.get("id"),
             "code": case.get("code"),
             "title": case.get("title"),
@@ -265,6 +320,9 @@ class CaseRunner:
             },
             "checks": checks,
         }
+        if extract is not None:
+            result["extracted"] = extracted
+        return result
 
     def run_cases(
         self, cases: list[dict[str, Any]], variables: dict[str, str] | None = None,

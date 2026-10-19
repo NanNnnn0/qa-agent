@@ -10,34 +10,42 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
-from nanobot.qa.util import dumps, loads, new_id, utcnow_iso
+from nanobot.qa import catalog
+from nanobot.qa.util import dumps, loads, new_id, sha256_json, utcnow_iso
 from nanobot.qa.validation import (
     CASE_KINDS,
     CASE_PRIORITIES,
+    CASE_REVISION_SOURCES,
     CASE_SOURCES,
     CASE_STATUSES,
+    OPERATION_STATUSES,
     RUN_STATUSES,
     RUN_TRIGGERS,
     SCRIPT_FRAMEWORKS,
     TASK_ROLES,
     TASK_STATUSES,
     QaConflictError,
+    QaError,
     QaNotFoundError,
     QaValidationError,
+    normalize_api_operation,
+    normalize_case_candidate,
     normalize_json_object,
     normalize_project_key,
     normalize_tags,
     optional_text,
     require_enum,
+    require_method,
     require_text,
     validate_api_spec,
     validate_steps,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -146,6 +154,69 @@ CREATE TABLE IF NOT EXISTS task_artifacts (
     title TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, kind, ref_id)
 );
+
+-- Version 3: API reference assets. The catalog records what the reference
+-- material declares, revisions record every case body, and workflows keep the
+-- batch that produced them.
+CREATE TABLE IF NOT EXISTS api_operations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    path_template TEXT NOT NULL,
+    operation_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    spec TEXT NOT NULL DEFAULT '{}',
+    evidence TEXT NOT NULL DEFAULT '[]',
+    source_kind TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT '',
+    source_version TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, method, path)
+);
+CREATE INDEX IF NOT EXISTS idx_api_operations_project ON api_operations(project_id, status);
+
+CREATE TABLE IF NOT EXISTS api_case_metadata (
+    case_id TEXT PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+    operation_id TEXT REFERENCES api_operations(id) ON DELETE SET NULL,
+    scenario_key TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    UNIQUE (operation_id, scenario_key)
+);
+
+CREATE TABLE IF NOT EXISTS api_case_revisions (
+    id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    snapshot TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    change_source TEXT NOT NULL DEFAULT 'edit',
+    changed_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE (case_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_api_case_revisions_hash ON api_case_revisions(content_hash);
+
+CREATE TABLE IF NOT EXISTS api_workflows (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'api_cases',
+    status TEXT NOT NULL DEFAULT 'pending',
+    base TEXT NOT NULL DEFAULT '{}',
+    candidates TEXT NOT NULL DEFAULT '[]',
+    checkpoint TEXT NOT NULL DEFAULT '{}',
+    result TEXT NOT NULL DEFAULT '{}',
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_workflows_idempotency
+    ON api_workflows(idempotency_key) WHERE idempotency_key != '';
 """
 
 _JSON_CASE_FIELDS = ("steps", "api", "tags")
@@ -165,6 +236,25 @@ _TASK_UPDATE_FIELDS = {
     "project_id", "parent_id", "role", "title", "prompt", "status", "progress",
     "session_key", "subagent_task_id", "result",
 }
+_JSON_OPERATION_FIELDS = ("spec", "evidence")
+_JSON_METADATA_FIELDS = ("evidence",)
+_CASE_COLUMNS = (
+    "id", "project_id", "code", "title", "kind", "priority", "status",
+    "preconditions", "steps", "api", "expected", "tags", "source", "author",
+    "created_at", "updated_at",
+)
+_CASE_BODY_FIELDS = (
+    "code", "title", "kind", "priority", "status", "preconditions", "steps",
+    "api", "expected", "tags", "source", "author", "updated_at",
+)
+_INSERT_CASE_SQL = (
+    "INSERT INTO cases (" + ", ".join(_CASE_COLUMNS) + ") VALUES ("
+    + ", ".join("?" for _ in _CASE_COLUMNS) + ")"
+)
+_UPDATE_CASE_SQL = (
+    "UPDATE cases SET " + ", ".join(f"{field} = ?" for field in _CASE_BODY_FIELDS)
+    + " WHERE id = ?"
+)
 
 
 def _row_to_dict(row: sqlite3.Row, json_fields: Iterable[str] = ()) -> dict[str, Any]:
@@ -210,6 +300,8 @@ class QaStore:
             ):
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {ddl}")
+        # Version 3 only adds tables, which executescript already created above,
+        # so upgrading a version-2 database needs no data rewrite.
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -229,6 +321,25 @@ class QaStore:
     def _write(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self._lock, self._conn:
             self._conn.execute(sql, params)
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run several statements atomically while holding the store lock.
+
+        Statement helpers that commit on their own must not be used inside the
+        block; call ``self._conn.execute`` directly so a failure rolls back the
+        whole batch.
+        """
+        with self._lock:
+            if self._conn.in_transaction:
+                self._conn.commit()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.rollback()
+                raise
+            self._conn.commit()
 
     # -- projects ----------------------------------------------------------
 
@@ -406,42 +517,122 @@ class QaStore:
         tags: Any = None,
         source: str = "manual",
         author: str = "",
+        change_source: str = "create",
+        changed_by: str = "",
+    ) -> dict[str, Any]:
+        return self._create_case(
+            project_id,
+            title=title,
+            kind=kind,
+            code=code,
+            priority=priority,
+            status=status,
+            preconditions=preconditions,
+            steps=steps,
+            api=api,
+            expected=expected,
+            tags=tags,
+            source=source,
+            author=author,
+            change_source=change_source,
+            changed_by=changed_by,
+        )
+
+    def _prepare_case(
+        self,
+        project: dict[str, Any],
+        *,
+        case_id: str,
+        title: str,
+        kind: str,
+        code: Any,
+        priority: str,
+        status: str,
+        preconditions: str,
+        steps: Any,
+        api: Any,
+        expected: str,
+        tags: Any,
+        source: str,
+        author: str,
+        exclude_case_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and normalize one case row without touching the database."""
+        case_kind = require_enum(kind, "kind", CASE_KINDS, default="api")
+        now = utcnow_iso()
+        return {
+            "id": case_id,
+            "project_id": project["id"],
+            "code": self._resolve_case_code(
+                project["key"], project["id"], case_kind, code,
+                exclude_case_id=exclude_case_id,
+            ),
+            "title": require_text(title, "title", max_length=300),
+            "kind": case_kind,
+            "priority": require_enum(priority, "priority", CASE_PRIORITIES, default="P1"),
+            "status": require_enum(status, "status", CASE_STATUSES, default="draft"),
+            "preconditions": optional_text(preconditions, "preconditions", max_length=5000),
+            "steps": dumps(validate_steps(steps)),
+            "api": dumps(validate_api_spec(api)),
+            "expected": optional_text(expected, "expected", max_length=5000),
+            "tags": dumps(normalize_tags(tags)),
+            "source": require_enum(source, "source", CASE_SOURCES, default="manual"),
+            "author": optional_text(author, "author", max_length=120),
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def _create_case(
+        self,
+        project_id: str,
+        *,
+        title: str,
+        kind: str = "api",
+        code: Any = None,
+        priority: str = "P1",
+        status: str = "draft",
+        preconditions: str = "",
+        steps: Any = None,
+        api: Any = None,
+        expected: str = "",
+        tags: Any = None,
+        source: str = "manual",
+        author: str = "",
+        change_source: str = "create",
+        changed_by: str = "",
     ) -> dict[str, Any]:
         project = self._require_project(project_id)
-        case_kind = require_enum(kind, "kind", CASE_KINDS, default="api")
-        case_title = require_text(title, "title", max_length=300)
-        case_code = self._resolve_case_code(
-            project["key"], project_id, case_kind, code,
+        row = self._prepare_case(
+            project,
+            case_id=new_id("case"),
+            title=title,
+            kind=kind,
+            code=code,
+            priority=priority,
+            status=status,
+            preconditions=preconditions,
+            steps=steps,
+            api=api,
+            expected=expected,
+            tags=tags,
+            source=source,
+            author=author,
         )
-        now = utcnow_iso()
-        case_id = new_id("case")
-        self._write(
-            "INSERT INTO cases (id, project_id, code, title, kind, priority, status,"
-            " preconditions, steps, api, expected, tags, source, author, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                case_id,
-                project_id,
-                case_code,
-                case_title,
-                case_kind,
-                require_enum(priority, "priority", CASE_PRIORITIES, default="P1"),
-                require_enum(status, "status", CASE_STATUSES, default="draft"),
-                optional_text(preconditions, "preconditions", max_length=5000),
-                dumps(validate_steps(steps)),
-                dumps(validate_api_spec(api)),
-                optional_text(expected, "expected", max_length=5000),
-                dumps(normalize_tags(tags)),
-                require_enum(source, "source", CASE_SOURCES, default="manual"),
-                optional_text(author, "author", max_length=120),
-                now,
-                now,
-            ),
-        )
-        return self.get_case(case_id)
+        with self._transaction():
+            self._conn.execute(_INSERT_CASE_SQL, tuple(row[column] for column in _CASE_COLUMNS))
+            self._insert_case_revision(
+                row["id"],
+                revision=1,
+                change_source=require_enum(
+                    change_source, "change_source", CASE_REVISION_SOURCES, default="create",
+                ),
+                changed_by=changed_by or row["author"],
+            )
+        return self.get_case(row["id"])
 
     def _resolve_case_code(
         self, project_key: str, project_id: str, kind: str, code: Any,
+        *, exclude_case_id: str | None = None,
     ) -> str:
         if code is None or code == "":
             return self._next_case_code(project_key, kind)
@@ -451,7 +642,8 @@ class QaStore:
         if not normalized:
             return self._next_case_code(project_key, kind)
         clash = self._fetchone(
-            "SELECT id FROM cases WHERE project_id = ? AND code = ?", (project_id, normalized)
+            "SELECT id FROM cases WHERE project_id = ? AND code = ? AND id != ?",
+            (project_id, normalized, exclude_case_id or ""),
         )
         if clash is not None:
             raise QaConflictError(f"case code '{normalized}' already exists in this project")
@@ -463,7 +655,15 @@ class QaStore:
             raise QaNotFoundError(f"case '{case_id}' not found")
         return _row_to_dict(row, _JSON_CASE_FIELDS)
 
-    def update_case(self, case_id: str, **fields: Any) -> dict[str, Any]:
+    def update_case(
+        self,
+        case_id: str,
+        *,
+        base_revision: int | None = None,
+        change_source: str = "edit",
+        changed_by: str = "",
+        **fields: Any,
+    ) -> dict[str, Any]:
         current = self.get_case(case_id)
         updates: dict[str, Any] = {}
         for field, value in fields.items():
@@ -497,10 +697,28 @@ class QaStore:
             return current
         updates["updated_at"] = utcnow_iso()
         assignments = ", ".join(f"{field} = ?" for field in updates)
-        self._write(
-            f"UPDATE cases SET {assignments} WHERE id = ?",
-            (*updates.values(), case_id),
+        source = require_enum(
+            change_source, "change_source", CASE_REVISION_SOURCES, default="edit",
         )
+        with self._transaction():
+            latest = self._latest_case_revision_row(case_id)
+            latest_revision = int(latest["revision"]) if latest is not None else 0
+            if base_revision is not None and base_revision != latest_revision:
+                raise QaConflictError(
+                    f"case '{case_id}' is at revision {latest_revision}, not {base_revision}"
+                )
+            self._conn.execute(
+                f"UPDATE cases SET {assignments} WHERE id = ?",
+                (*updates.values(), case_id),
+            )
+            snapshot = self._case_snapshot(self.get_case(case_id))
+            if latest is None or latest["content_hash"] != sha256_json(snapshot):
+                self._insert_case_revision(
+                    case_id,
+                    revision=latest_revision + 1,
+                    change_source=source,
+                    changed_by=changed_by,
+                )
         return self.get_case(case_id)
 
     def delete_case(self, case_id: str) -> None:
@@ -546,14 +764,19 @@ class QaStore:
         }
 
     def export_cases(self, project_id: str | None = None) -> dict[str, Any]:
+        """Export every case in scope; the response is never truncated."""
         project = self.get_project(project_id) if project_id else None
-        result = self.list_cases(project_id=project_id, limit=500)
+        where = " WHERE project_id = ?" if project_id else ""
+        params: tuple[Any, ...] = (project_id,) if project_id else ()
+        rows = self._fetchall(f"SELECT * FROM cases{where} ORDER BY code", params)
+        cases = [_row_to_dict(row, _JSON_CASE_FIELDS) for row in rows]
         return {
             "format": "qa-agent.cases.v1",
             "project": {"key": project["key"], "name": project["name"]}
             if project else None,
             "exported_at": utcnow_iso(),
-            "cases": result["items"],
+            "total": len(cases),
+            "cases": cases,
         }
 
     def import_cases(self, project_id: str, payload: Any) -> dict[str, Any]:
@@ -594,6 +817,8 @@ class QaStore:
                     tags=item.get("tags"),
                     source="import",
                     author=item.get("author", ""),
+                    change_source="import",
+                    changed_by=item.get("author", ""),
                 )
             except QaConflictError as exc:
                 skipped.append({"index": index, "code": code, "reason": str(exc)})
@@ -1070,6 +1295,594 @@ class QaStore:
         if row is None:
             raise QaNotFoundError(f"task '{task_id}' not found")
         return row
+
+    # -- case revisions ----------------------------------------------------
+
+    def _latest_case_revision_row(self, case_id: str) -> sqlite3.Row | None:
+        return self._fetchone(
+            "SELECT revision, content_hash FROM api_case_revisions"
+            " WHERE case_id = ? ORDER BY revision DESC LIMIT 1",
+            (case_id,),
+        )
+
+    def _case_snapshot(self, case: dict[str, Any]) -> dict[str, Any]:
+        return {field: case[field] for field in sorted(_CASE_UPDATE_FIELDS) if field in case}
+
+    def _prepared_snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Snapshot of a prepared row, shaped exactly like ``_case_snapshot``."""
+        snapshot = {field: row.get(field, "") for field in sorted(_CASE_UPDATE_FIELDS)}
+        snapshot["steps"] = loads(row.get("steps"), [])
+        snapshot["api"] = loads(row.get("api"), {})
+        snapshot["tags"] = loads(row.get("tags"), [])
+        return snapshot
+
+    def _insert_case_revision(
+        self, case_id: str, *, revision: int, change_source: str, changed_by: str,
+    ) -> None:
+        """Append a revision row; the caller must already hold a transaction."""
+        snapshot = self._case_snapshot(self.get_case(case_id))
+        now = utcnow_iso()
+        self._conn.execute(
+            "INSERT INTO api_case_revisions (id, case_id, revision, snapshot, content_hash,"
+            " change_source, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                new_id("rev"), case_id, revision, dumps(snapshot), sha256_json(snapshot),
+                change_source, changed_by, now,
+            ),
+        )
+        self._conn.execute(
+            "UPDATE api_case_metadata SET revision = ?, updated_at = ? WHERE case_id = ?",
+            (revision, now, case_id),
+        )
+
+    def list_case_revisions(
+        self, case_id: str, *, limit: int = 50, offset: int = 0,
+    ) -> dict[str, Any]:
+        self.get_case(case_id)
+        total_row = self._fetchone(
+            "SELECT COUNT(*) AS total FROM api_case_revisions WHERE case_id = ?", (case_id,)
+        )
+        rows = self._fetchall(
+            "SELECT id, case_id, revision, content_hash, change_source, changed_by, created_at"
+            " FROM api_case_revisions WHERE case_id = ? ORDER BY revision DESC LIMIT ? OFFSET ?",
+            (case_id, max(1, min(limit, 200)), max(0, offset)),
+        )
+        return {
+            "items": [_row_to_dict(row) for row in rows],
+            "total": int(total_row["total"]) if total_row is not None else 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_case_revision(self, case_id: str, revision: int) -> dict[str, Any]:
+        row = self._fetchone(
+            "SELECT * FROM api_case_revisions WHERE case_id = ? AND revision = ?",
+            (case_id, int(revision)),
+        )
+        if row is None:
+            raise QaNotFoundError(f"revision {revision} of case '{case_id}' not found")
+        data = _row_to_dict(row)
+        data["snapshot"] = loads(data.get("snapshot"), {})
+        return data
+
+    def get_case_metadata(self, case_id: str) -> dict[str, Any]:
+        row = self._fetchone(
+            "SELECT * FROM api_case_metadata WHERE case_id = ?", (case_id,)
+        )
+        if row is None:
+            raise QaNotFoundError(f"case '{case_id}' is not linked to the API catalog")
+        return _row_to_dict(row, _JSON_METADATA_FIELDS)
+
+    # -- api catalog -------------------------------------------------------
+
+    def ingest_api_operations(
+        self,
+        project_id: str,
+        operations: Any,
+        *,
+        source_kind: str = "",
+        source_ref: str = "",
+        source_version: str = "",
+    ) -> dict[str, Any]:
+        """Upsert a parsed reference batch and report what moved.
+
+        The batch is compared before writing, so re-ingesting identical material
+        writes nothing. Operations that disappeared from the material are marked
+        ``missing`` instead of deleted: existing cases may still point at them.
+        """
+        self._require_project(project_id)
+        normalized = self._normalize_operations(operations)
+        existing = [
+            _row_to_dict(row, _JSON_OPERATION_FIELDS)
+            for row in self._fetchall(
+                "SELECT * FROM api_operations WHERE project_id = ?", (project_id,)
+            )
+        ]
+        diff = catalog.diff_operations(existing, normalized)
+        now = utcnow_iso()
+        added: list[dict[str, Any]] = []
+        updated: list[dict[str, Any]] = []
+        with self._transaction():
+            for operation in diff["added"]:
+                operation_id = new_id("op")
+                self._conn.execute(
+                    "INSERT INTO api_operations (id, project_id, method, path, path_template,"
+                    " operation_id, summary, spec, evidence, source_kind, source_ref,"
+                    " source_version, content_hash, status, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                    (
+                        operation_id,
+                        project_id,
+                        operation["method"],
+                        operation["path"],
+                        operation["path_template"],
+                        operation["operation_id"],
+                        operation["summary"],
+                        dumps(operation["spec"]),
+                        dumps(operation["evidence"]),
+                        optional_text(source_kind, "source_kind", max_length=40),
+                        optional_text(source_ref, "source_ref", max_length=2000),
+                        optional_text(source_version, "source_version", max_length=200),
+                        catalog.operation_hash(operation),
+                        now,
+                        now,
+                    ),
+                )
+                added.append({
+                    "id": operation_id,
+                    "method": operation["method"],
+                    "path": operation["path"],
+                    "operation_id": operation["operation_id"],
+                })
+            for change in diff["changed"]:
+                operation = change["operation"]
+                self._conn.execute(
+                    "UPDATE api_operations SET path_template = ?, operation_id = ?,"
+                    " summary = ?, spec = ?, evidence = ?, source_kind = ?, source_ref = ?,"
+                    " source_version = ?, content_hash = ?, status = 'active', updated_at = ?"
+                    " WHERE id = ?",
+                    (
+                        operation["path_template"],
+                        operation["operation_id"],
+                        operation["summary"],
+                        dumps(operation["spec"]),
+                        dumps(operation["evidence"]),
+                        optional_text(source_kind, "source_kind", max_length=40),
+                        optional_text(source_ref, "source_ref", max_length=2000),
+                        optional_text(source_version, "source_version", max_length=200),
+                        catalog.operation_hash(operation),
+                        now,
+                        change["id"],
+                    ),
+                )
+                updated.append({
+                    "id": change["id"],
+                    "method": operation["method"],
+                    "path": operation["path"],
+                    "fields": change["fields"],
+                })
+            for stale in diff["missing"]:
+                self._conn.execute(
+                    "UPDATE api_operations SET status = 'missing', updated_at = ? WHERE id = ?",
+                    (now, stale["id"]),
+                )
+        return {
+            "added": added,
+            "updated": updated,
+            "missing": diff["missing"],
+            "unchanged": diff["unchanged"],
+        }
+
+    def diff_api_operations(self, project_id: str, operations: Any) -> dict[str, Any]:
+        """Report what ingesting the batch would change without writing anything."""
+        self._require_project(project_id)
+        normalized = self._normalize_operations(operations)
+        existing = [
+            _row_to_dict(row, _JSON_OPERATION_FIELDS)
+            for row in self._fetchall(
+                "SELECT * FROM api_operations WHERE project_id = ?", (project_id,)
+            )
+        ]
+        diff = catalog.diff_operations(existing, normalized)
+        return {
+            "added": [self._operation_summary(item) for item in diff["added"]],
+            "changed": [
+                {**self._operation_summary(change["operation"]), "id": change["id"],
+                 "fields": change["fields"]}
+                for change in diff["changed"]
+            ],
+            "missing": diff["missing"],
+            "unchanged": diff["unchanged"],
+        }
+
+    def list_api_operations(
+        self,
+        project_id: str | None = None,
+        *,
+        query: str | None = None,
+        method: str | None = None,
+        status: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if method:
+            clauses.append("method = ?")
+            params.append(require_method(method))
+        if status:
+            clauses.append("status = ?")
+            params.append(require_enum(status, "status", OPERATION_STATUSES))
+        if query:
+            clauses.append("(summary LIKE ? OR path LIKE ? OR operation_id LIKE ?)")
+            pattern = f"%{query}%"
+            params.extend([pattern, pattern, pattern])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        total_row = self._fetchone(
+            f"SELECT COUNT(*) AS total FROM api_operations{where}", tuple(params)
+        )
+        rows = self._fetchall(
+            "SELECT id, project_id, method, path, path_template, operation_id, summary,"
+            " source_kind, source_ref, source_version, status, created_at, updated_at"
+            f" FROM api_operations{where} ORDER BY path, method LIMIT ? OFFSET ?",
+            (*params, max(1, min(limit, 200)), max(0, offset)),
+        )
+        return {
+            "items": [_row_to_dict(row) for row in rows],
+            "total": int(total_row["total"]) if total_row is not None else 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_api_operation(self, operation_id: str) -> dict[str, Any]:
+        row = self._fetchone("SELECT * FROM api_operations WHERE id = ?", (operation_id,))
+        if row is None:
+            raise QaNotFoundError(f"operation '{operation_id}' not found")
+        return _row_to_dict(row, _JSON_OPERATION_FIELDS)
+
+    def _normalize_operations(self, operations: Any) -> list[dict[str, Any]]:
+        if not isinstance(operations, list) or not operations:
+            raise QaValidationError("operations must be a non-empty array")
+        normalized = [normalize_api_operation(item) for item in operations]
+        keys = [(item["method"], item["path"]) for item in normalized]
+        if len(set(keys)) != len(keys):
+            raise QaValidationError("operations contain duplicate method + path entries")
+        return normalized
+
+    def _operation_summary(self, operation: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "method": operation["method"],
+            "path": operation["path"],
+            "operation_id": operation.get("operation_id", ""),
+            "summary": operation.get("summary", ""),
+        }
+
+    def _find_api_operation(
+        self, project_id: str, operation: dict[str, str] | None,
+    ) -> dict[str, Any] | None:
+        if not operation:
+            return None
+        if "operation_id" in operation:
+            row = self._fetchone(
+                "SELECT * FROM api_operations WHERE id = ? AND project_id = ?",
+                (operation["operation_id"], project_id),
+            )
+            target = operation["operation_id"]
+        else:
+            row = self._fetchone(
+                "SELECT * FROM api_operations WHERE project_id = ? AND method = ? AND path = ?",
+                (project_id, operation["method"], operation["path"]),
+            )
+            target = f"{operation['method']} {operation['path']}"
+        if row is None:
+            raise QaValidationError(f"operation '{target}' is not in this project's catalog")
+        return _row_to_dict(row, _JSON_OPERATION_FIELDS)
+    # -- api asset workflows -----------------------------------------------
+
+    def create_api_workflow(
+        self,
+        project_id: str,
+        *,
+        candidates: Any,
+        idempotency_key: str = "",
+        kind: str = "api_cases",
+        base: Any = None,
+    ) -> dict[str, Any]:
+        """Stage a candidate batch; the same idempotency key returns the same workflow."""
+        self._require_project(project_id)
+        key = optional_text(idempotency_key, "idempotency_key", max_length=200)
+        if key:
+            existing = self._fetchone(
+                "SELECT * FROM api_workflows WHERE idempotency_key = ?", (key,)
+            )
+            if existing is not None:
+                return self._row_to_workflow(existing)
+        normalized = self._normalize_candidates(candidates)
+        workflow_id = new_id("wf")
+        now = utcnow_iso()
+        self._write(
+            "INSERT INTO api_workflows (id, project_id, kind, status, base, candidates,"
+            " checkpoint, result, idempotency_key, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'pending', ?, ?, '{}', '{}', ?, ?, ?)",
+            (
+                workflow_id,
+                project_id,
+                require_text(kind, "kind", max_length=40),
+                dumps(normalize_json_object(base, "base")),
+                dumps(normalized),
+                key,
+                now,
+                now,
+            ),
+        )
+        return self.get_api_workflow(workflow_id)
+
+    def get_api_workflow(self, workflow_id: str) -> dict[str, Any]:
+        row = self._fetchone("SELECT * FROM api_workflows WHERE id = ?", (workflow_id,))
+        if row is None:
+            raise QaNotFoundError(f"workflow '{workflow_id}' not found")
+        workflow = self._row_to_workflow(row)
+        workflow["candidate_count"] = len(workflow["candidates"])
+        return workflow
+
+    def validate_api_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Report what applying the batch would do, without writing anything."""
+        workflow = self.get_api_workflow(workflow_id)
+        project = self._require_project(workflow["project_id"])
+        prepared: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for index, candidate in enumerate(workflow["candidates"]):
+            try:
+                item = self._prepare_candidate(project, candidate)
+            except QaError as exc:
+                errors.append(f"candidates[{index}]: {exc}")
+                continue
+            operation = item["operation"]
+            prepared.append({
+                "index": index,
+                "title": item["row"]["title"],
+                "code": item["row"]["code"],
+                "scenario_key": item["scenario_key"],
+                "operation_id": operation["id"] if operation is not None else "",
+                "operation": (
+                    f"{operation['method']} {operation['path']}"
+                    if operation is not None else ""
+                ),
+                "action": "update" if item["existing_case_id"] else "create",
+                "case_id": item["existing_case_id"] or "",
+            })
+        return {
+            "workflow_id": workflow_id,
+            "status": workflow["status"],
+            "candidates": prepared,
+            "errors": errors,
+            "ok": not errors and len(prepared) == len(workflow["candidates"]),
+        }
+
+    def replace_api_workflow_candidates(
+        self, workflow_id: str, candidates: Any,
+    ) -> dict[str, Any]:
+        """Replace the staged batch and reset the checkpoint, so a failed batch can resume."""
+        workflow = self.get_api_workflow(workflow_id)
+        if workflow["status"] == "applied":
+            raise QaConflictError(f"workflow '{workflow_id}' is already applied")
+        normalized = self._normalize_candidates(candidates)
+        self._write(
+            "UPDATE api_workflows SET candidates = ?, status = 'pending', checkpoint = '{}',"
+            " result = '{}', updated_at = ? WHERE id = ?",
+            (dumps(normalized), utcnow_iso(), workflow_id),
+        )
+        return self.get_api_workflow(workflow_id)
+
+    def apply_api_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Apply a staged batch in one transaction; repeating it changes nothing."""
+        workflow = self.get_api_workflow(workflow_id)
+        if workflow["status"] == "applied":
+            return workflow
+        project = self._require_project(workflow["project_id"])
+        try:
+            prepared = [
+                self._prepare_candidate(project, candidate)
+                for candidate in workflow["candidates"]
+            ]
+        except Exception as exc:
+            self._fail_workflow(workflow_id, {"errors": [str(exc)]})
+            raise
+        applied: list[dict[str, Any]] = []
+        updated: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            with self._transaction():
+                for item in prepared:
+                    row = item["row"]
+                    existing_case_id = item["existing_case_id"]
+                    if existing_case_id:
+                        latest = self._latest_case_revision_row(existing_case_id)
+                        latest_revision = int(latest["revision"]) if latest is not None else 0
+                        if (
+                            item["base_revision"] is not None
+                            and item["base_revision"] != latest_revision
+                        ):
+                            raise QaConflictError(
+                                f"case '{row['code']}' is at revision {latest_revision},"
+                                f" not {item['base_revision']}"
+                            )
+                        self._conn.execute(
+                            _UPDATE_CASE_SQL,
+                            (*[row[field] for field in _CASE_BODY_FIELDS], existing_case_id),
+                        )
+                        self._insert_case_revision(
+                            existing_case_id,
+                            revision=latest_revision + 1,
+                            change_source="workflow",
+                            changed_by="",
+                        )
+                        case_id = existing_case_id
+                        revision = latest_revision + 1
+                        updated.append({
+                            "case_id": case_id, "code": row["code"], "revision": revision,
+                        })
+                    else:
+                        duplicate = self._find_identical_case(
+                            project["id"], self._prepared_snapshot(row)
+                        )
+                        if duplicate is not None:
+                            skipped.append({
+                                "code": row["code"],
+                                "reason": "identical content",
+                                "case_id": duplicate,
+                            })
+                            continue
+                        self._conn.execute(
+                            _INSERT_CASE_SQL, tuple(row[column] for column in _CASE_COLUMNS)
+                        )
+                        self._insert_case_revision(
+                            row["id"], revision=1, change_source="workflow", changed_by="",
+                        )
+                        case_id = row["id"]
+                        revision = 1
+                        applied.append({
+                            "case_id": case_id, "code": row["code"], "revision": revision,
+                        })
+                    if item["operation"] is not None or item["scenario_key"]:
+                        self._upsert_case_metadata(
+                            case_id,
+                            operation_id=item["operation"]["id"] if item["operation"] else None,
+                            scenario_key=item["scenario_key"],
+                            evidence=item["evidence"],
+                            revision=revision,
+                        )
+                checkpoint = {"applied": applied, "updated": updated, "skipped": skipped}
+                result = {
+                    "applied": len(applied),
+                    "updated": len(updated),
+                    "skipped": len(skipped),
+                }
+                self._conn.execute(
+                    "UPDATE api_workflows SET status = 'applied', checkpoint = ?, result = ?,"
+                    " updated_at = ? WHERE id = ?",
+                    (dumps(checkpoint), dumps(result), utcnow_iso(), workflow_id),
+                )
+        except Exception as exc:
+            self._fail_workflow(workflow_id, {"errors": [str(exc)]})
+            raise
+        return self.get_api_workflow(workflow_id)
+
+    def _prepare_candidate(
+        self, project: dict[str, Any], candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        operation = self._find_api_operation(project["id"], candidate["operation"])
+        payload = candidate["case"]
+        existing_case_id: str | None = None
+        if operation is not None and candidate["scenario_key"]:
+            row = self._fetchone(
+                "SELECT case_id FROM api_case_metadata"
+                " WHERE operation_id = ? AND scenario_key = ?",
+                (operation["id"], candidate["scenario_key"]),
+            )
+            existing_case_id = row["case_id"] if row is not None else None
+        code = payload.get("code")
+        if existing_case_id is not None and not code:
+            code = self.get_case(existing_case_id)["code"]
+        row = self._prepare_case(
+            project,
+            case_id=existing_case_id or new_id("case"),
+            title=payload.get("title", ""),
+            kind=payload.get("kind", "api"),
+            code=code,
+            priority=payload.get("priority", "P1"),
+            status=payload.get("status", "draft"),
+            preconditions=payload.get("preconditions", ""),
+            steps=payload.get("steps"),
+            api=payload.get("api"),
+            expected=payload.get("expected", ""),
+            tags=payload.get("tags"),
+            source=payload.get("source", "ai"),
+            author=payload.get("author", ""),
+            exclude_case_id=existing_case_id,
+        )
+        return {
+            "row": row,
+            "operation": operation,
+            "scenario_key": candidate["scenario_key"],
+            "evidence": candidate["evidence"],
+            "base_revision": candidate["base_revision"],
+            "existing_case_id": existing_case_id,
+        }
+
+    def _find_identical_case(
+        self, project_id: str, snapshot: dict[str, Any],
+    ) -> str | None:
+        row = self._fetchone(
+            "SELECT r.case_id AS case_id FROM api_case_revisions r"
+            " JOIN cases c ON c.id = r.case_id"
+            " WHERE c.project_id = ? AND r.content_hash = ? LIMIT 1",
+            (project_id, sha256_json(snapshot)),
+        )
+        return row["case_id"] if row is not None else None
+
+    def _upsert_case_metadata(
+        self,
+        case_id: str,
+        *,
+        operation_id: str | None,
+        scenario_key: str,
+        evidence: list[dict[str, str]],
+        revision: int,
+    ) -> None:
+        now = utcnow_iso()
+        self._conn.execute(
+            "INSERT INTO api_case_metadata (case_id, operation_id, scenario_key, evidence,"
+            " revision, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(case_id) DO UPDATE SET operation_id = excluded.operation_id,"
+            " scenario_key = excluded.scenario_key, evidence = excluded.evidence,"
+            " revision = excluded.revision, updated_at = excluded.updated_at",
+            (case_id, operation_id, scenario_key, dumps(evidence), revision, now),
+        )
+
+    def _normalize_candidates(self, candidates: Any) -> list[dict[str, Any]]:
+        if not isinstance(candidates, list) or not candidates:
+            raise QaValidationError("candidates must be a non-empty array")
+        normalized = [
+            normalize_case_candidate(item, index) for index, item in enumerate(candidates)
+        ]
+        seen: set[tuple[str, str]] = set()
+        for item in normalized:
+            operation = item["operation"]
+            if operation is None:
+                continue
+            target = operation.get("operation_id") or (
+                f"{operation.get('method')} {operation.get('path')}"
+            )
+            key = (target, item["scenario_key"])
+            if key in seen:
+                raise QaValidationError(
+                    f"candidates contain a duplicate {target} + '{item['scenario_key']}' pair"
+                )
+            seen.add(key)
+        return normalized
+
+    def _row_to_workflow(self, row: sqlite3.Row) -> dict[str, Any]:
+        data = _row_to_dict(row)
+        for field in ("base", "candidates", "checkpoint", "result"):
+            data[field] = loads(data.get(field), {})
+        if not isinstance(data.get("candidates"), list):
+            data["candidates"] = []
+        for field in ("base", "checkpoint", "result"):
+            if not isinstance(data.get(field), dict):
+                data[field] = {}
+        return data
+
+    def _fail_workflow(self, workflow_id: str, result: dict[str, Any]) -> None:
+        """Record why a batch did not apply; the workflow stays resumable."""
+        self._write(
+            "UPDATE api_workflows SET status = 'failed', result = ?, updated_at = ?"
+            " WHERE id = ?",
+            (dumps(result), utcnow_iso(), workflow_id),
+        )
 
     # -- overview ----------------------------------------------------------
 
