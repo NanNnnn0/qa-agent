@@ -379,7 +379,14 @@ function QaRunDrawer({
           ) : null}
 
           <QaDetailSection title={tx("qa.runs.summary", "摘要")}>
-            <QaPre>{run.report?.summary || tx("qa.runs.noSummary", "（无摘要）")}</QaPre>
+            <QaRunSummaryBlock run={run} />
+          </QaDetailSection>
+
+          <QaDetailSection
+            title={tx("qa.runs.planSnapshot", "计划与快照")}
+            hint={run.report?.template_version ? `template ${run.report.template_version}` : undefined}
+          >
+            <QaRunPlanBlock run={run} />
           </QaDetailSection>
 
           <QaDetailSection
@@ -411,6 +418,12 @@ function QaRunDrawer({
                       >
                         {test.status}
                       </QaBadge>
+                      {test.phase ? <QaBadge tone="neutral">{test.phase}</QaBadge> : null}
+                      {test.classification && test.classification !== "passed" ? (
+                        <span className="font-mono text-[10.5px] text-muted-foreground">
+                          {test.classification}
+                        </span>
+                      ) : null}
                       <span
                         title={test.name || test.code}
                         className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground"
@@ -594,5 +607,125 @@ function QaRunImportDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function QaRunSummaryBlock({ run }: { run: QaRun }) {
+  const tx = useQaCopy();
+  const summary = run.report?.summary;
+  if (!summary) {
+    return <QaPre>{tx("qa.runs.noSummary", "（无摘要）")}</QaPre>;
+  }
+  if (typeof summary === "string") {
+    return <QaPre>{summary}</QaPre>;
+  }
+  const phases = summary.phases ? Object.entries(summary.phases) : [];
+  const cells: [string, number][] = [
+    [tx("qa.runs.summaryTests", "用例"), summary.tests],
+    [tx("qa.runs.summaryPassed", "通过"), summary.passed],
+    [tx("qa.runs.summaryFailed", "失败"), summary.failed],
+    [tx("qa.runs.summaryErrors", "错误"), summary.error],
+    [tx("qa.runs.summarySkipped", "跳过"), summary.skipped],
+    [tx("qa.runs.summaryBatches", "批次"), summary.batches ?? 1],
+  ];
+  return (
+    <div className="flex flex-col gap-2" data-testid="qa-run-summary">
+      <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+        {cells.map(([label, value]) => (
+          <div
+            key={label}
+            className="rounded-lg border border-border/60 bg-card px-2 py-1.5"
+          >
+            <div className="text-[11px] text-muted-foreground">{label}</div>
+            <div className="font-mono text-[13px] text-foreground">{value}</div>
+          </div>
+        ))}
+      </div>
+      {phases.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {phases.map(([phase, counts]) => (
+            <li
+              key={phase}
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-1.5 text-[12px]"
+            >
+              <span className="font-mono text-[11.5px] text-foreground">{phase}</span>
+              <span className="text-muted-foreground">
+                {tx("qa.runs.phaseCounts", "{{tests}} 条 · 通过 {{passed}} · 失败 {{failed}} · 错误 {{error}} · 跳过 {{skipped}}", {
+                  tests: counts.tests,
+                  passed: counts.passed,
+                  failed: counts.failed,
+                  error: counts.error,
+                  skipped: counts.skipped,
+                })}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function QaRunPlanBlock({ run }: { run: QaRun }) {
+  const tx = useQaCopy();
+  const report = run.report;
+  const snapshot = report?.snapshot ?? null;
+  const plan = snapshot?.plan;
+  const batches = report?.batches ?? [];
+  if (!snapshot && !report?.template_version && batches.length === 0) {
+    return (
+      <p className="text-[12px] text-muted-foreground">
+        {tx("qa.runs.noSnapshot", "这次运行没有固定快照（脚本运行或旧路径）")}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2 text-[12px]" data-testid="qa-run-snapshot">
+      <div className="flex flex-wrap gap-1.5">
+        <QaBadge tone="neutral">{`template ${report?.template_version || "—"}`}</QaBadge>
+        <QaBadge tone="neutral">{`plan ${report?.plan_version || "—"}`}</QaBadge>
+        <QaBadge tone="neutral">
+          {tx("qa.runs.snapshotCases", "{{count}} 条用例修订", {
+            count: snapshot?.cases.length ?? 0,
+          })}
+        </QaBadge>
+        {batches.length > 0 ? (
+          <QaBadge tone="neutral">
+            {tx("qa.runs.batchCount", "{{count}} 批", { count: batches.length })}
+          </QaBadge>
+        ) : null}
+      </div>
+      {plan ? (
+        <ul className="flex flex-col gap-1">
+          {Object.entries(plan.phases).map(([phase, steps]) => (
+            <li
+              key={phase}
+              className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-1.5"
+            >
+              <span className="font-mono text-[11.5px]">{phase}</span>
+              <span className="ml-2 text-muted-foreground">
+                {steps.map((step) => `${step.case_id}@r${step.revision}`).join(", ") || "—"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {snapshot && snapshot.cases.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {snapshot.cases.map((item) => (
+            <li
+              key={item.case_id}
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-card px-2.5 py-1.5"
+            >
+              <span className="font-mono text-[11.5px]">{item.code || item.case_id}</span>
+              <span className="text-muted-foreground">{`r${item.revision}`}</span>
+              <span className="truncate font-mono text-[10.5px] text-muted-foreground/70">
+                {item.content_hash.slice(0, 12)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
