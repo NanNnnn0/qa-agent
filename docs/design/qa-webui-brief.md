@@ -126,3 +126,31 @@ UI 要求：
 - **自动化**：运行脚本时也传 `name`（默认 `脚本名 + 时间`）与 `environment`（可留空）。
 
 测试要求：为 approve/reject 与 import 各加一条组件测试（断言调用 `requestMutation` 的 action 与 payload），运行 `npm test -- qa` 与 `npm run build`。
+
+## 7. v1.2 定时任务（qa.schedule.*）
+
+读：`GET /api/qa/schedules?project_id=` → `{items:[schedule]}`。
+
+写（WebSocket mutation）：
+
+| action | payload |
+|---|---|
+| `qa.schedule.create` | `{project_id,name,cron,timezone?,enabled?,target}` |
+| `qa.schedule.update` | `{id,name?,cron?,timezone?,enabled?,target?}` |
+| `qa.schedule.delete` | `{id}` |
+| `qa.schedule.run_now` | `{id}`（同步执行，mutation timeout 用 180000） |
+
+`target` 二选一：`{"kind":"script","script_id":"scr_..."}` 或 `{"kind":"cases","case_ids":["case_..."],"run_kind"?:"api"|"ui"|"manual"}`。
+
+`schedule` 形状：
+
+```ts
+type QaSchedule = { id; project_id; name; cron; timezone; enabled: boolean;
+  target; next_run_at: string|null; last_run_at; last_run_id; last_status; last_error;
+  created_at; updated_at }
+```
+
+UI 要求：工作台新增「定时任务」tab——列表（名称/项目/计划/目标/状态/下次运行）、项目筛选、新建与编辑、
+启用/暂停、立即运行（结果用运行卡片展示）、删除确认。执行由网关进程内的 `QaScheduler` 负责：
+每 30 秒用条件更新领取到期的 `next_run_at`（多进程共享数据库时同一触发只会被执行一次），
+以 `trigger="schedule"` 写入既有 run 记录，浏览器关闭不影响。`cron` 为五段表达式，`timezone` 为 IANA 名称，留空用网关本地时区。

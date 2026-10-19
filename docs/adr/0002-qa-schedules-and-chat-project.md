@@ -1,6 +1,6 @@
 # ADR 0002: Add QA schedule actions and a session QA project binding
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-19
 
 ## Context
@@ -70,3 +70,7 @@ type QaSchedule = {
 - **Prefix every chat prompt with the project key.** Pollutes user history, cannot be enforced server-side, and breaks once the user edits the message.
 - **Keep `trigger="schedule"` as a label on manually started runs.** Records provenance but schedules nothing.
 - **Client-side filter of projects in the workbench only.** Already exists; it does not tell the chat agent which project a turn belongs to.
+
+## Implementation
+
+Implemented on 2026-10-19: the `schedules` table (schema v3), `nanobot/qa/schedule_time.py`, `nanobot/qa/scheduler.py`, the four `qa.schedule.*` actions, and the gateway-started `QaScheduler`. The session `qa_project_id` binding (the first half of this decision) is not implemented yet.
