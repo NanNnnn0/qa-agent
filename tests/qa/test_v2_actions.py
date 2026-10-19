@@ -86,6 +86,7 @@ async def test_http_run_start_records_metadata(
     case = store.create_case(
         project["id"],
         title="products",
+        status="ready",
         api={
             "request": {"method": "GET", "path": "/api/products"},
             "assertions": [{"type": "status", "expect": 200}],

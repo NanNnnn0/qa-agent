@@ -497,9 +497,11 @@ class QaRunTool(_QaTool):
     @property
     def description(self) -> str:
         return (
-            "Execute API cases (structured assertions, httpx) or pytest scripts in a "
-            "subprocess, then persist the run. Read the report before writing a defect "
-            "summary. Use list/get to inspect previous failures."
+            "Execute ready API cases or pytest scripts, then persist the run. Case runs go "
+            "through the pinned pipeline: preflight refuses unready cases, the run records the "
+            "case revisions it executed, more than 200 cases are batched and credentials are "
+            "masked. Read the report before writing a defect summary. Use list/get to inspect "
+            "previous failures."
         )
 
     async def execute(

@@ -12,46 +12,9 @@ from xml.parsers.expat import ExpatError
 
 from defusedxml import ElementTree
 
-from nanobot.qa.runner import ENVIRONMENT_ERROR_MARKERS, CaseRunner
+from nanobot.qa import execution
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import QaValidationError
-
-MAX_CASES_PER_RUN = 200
-
-
-def _all_environment_errors(tests: list[dict[str, Any]]) -> bool:
-    """Distinguish a broken environment from a product defect.
-
-    A run where every case failed to connect is an environment problem; counting
-    it as a product failure would poison flake statistics and defect reports.
-    """
-    if not tests:
-        return False
-    errored = [test for test in tests if test.get("status") == "error"]
-    if len(errored) != len(tests):
-        return False
-    return all(
-        any(marker in str(test.get("message", "")) for marker in ENVIRONMENT_ERROR_MARKERS)
-        for test in errored
-    )
-
-
-def _resolve_cases(
-    store: QaStore, project_id: str, case_ids: list[str] | None, kind: str | None,
-) -> list[dict[str, Any]]:
-    if case_ids:
-        cases = []
-        for case_id in case_ids:
-            case = store.get_case(case_id)
-            if case["project_id"] != project_id:
-                raise QaValidationError(f"case '{case_id}' does not belong to this project")
-            cases.append(case)
-    else:
-        result = store.list_cases(project_id=project_id, kind=kind, limit=MAX_CASES_PER_RUN)
-        cases = result["items"]
-    if len(cases) > MAX_CASES_PER_RUN:
-        raise QaValidationError(f"at most {MAX_CASES_PER_RUN} cases can run at once")
-    return cases
 
 
 def execute_cases(
@@ -65,44 +28,31 @@ def execute_cases(
     environment: str = "",
     trigger: str = "manual",
 ) -> dict[str, Any]:
-    """Run API cases and persist one run row. Returns the completed run."""
-    project = store.get_project(project_id)
-    base_url = project.get("base_url") or ""
-    if not base_url:
-        raise QaValidationError("project has no base_url configured")
-    cases = _resolve_cases(store, project_id, case_ids, kind)
-    if not cases:
-        raise QaValidationError("no cases selected for this run")
-    run = store.create_run(
+    """Run ready API cases through the pinned pipeline.
+
+    This is the stable entry point for the WebUI, the CLI, the ``qa_run`` tool and
+    scheduled runs. Execution itself lives in :mod:`nanobot.qa.execution`, so
+    preflight, the pinned snapshot, batching, masking and classification have one
+    implementation instead of two. Only ``ready`` cases execute; a blocked case
+    fails the call with the case codes and reasons instead of running a subset.
+    """
+    run = execution.execute_pinned(
+        store,
         project_id,
-        case_ids=[case["id"] for case in cases],
+        case_ids=case_ids,
+        kind=kind,
         name=name,
         environment=environment,
         trigger=trigger,
     )
-    runner = CaseRunner(base_url, default_headers={})
-    report = runner.run_cases(cases, variables={
-        str(key): str(value) for key, value in (project.get("default_env") or {}).items()
-    })
-    summary = report["summary"]
-    status = "passed" if summary["failed"] == 0 and summary["error"] == 0 else "failed"
-    if summary["error"] and summary["passed"] == 0 and summary["failed"] == 0:
-        status = "blocked_by_env" if _all_environment_errors(report["tests"]) else "error"
-    finished = store.finish_run(
-        run["id"],
-        status=status,
-        passed=summary["passed"],
-        failed=summary["failed"],
-        errors=summary["error"],
-        skipped=summary["skipped"],
-        duration_ms=summary["duration"],
-        report=report,
-        log="",
-    )
     if task_id:
-        store.add_artifact(task_id, kind="run", ref_id=finished["id"],
-                           title=f"run {finished['id']} ({status})")
-    return finished
+        store.add_artifact(
+            task_id,
+            kind="run",
+            ref_id=run["id"],
+            title=f"run {run['id']} ({run['status']})",
+        )
+    return run
 
 
 def _junit_tests(root: Any) -> list[dict[str, Any]]:

@@ -144,6 +144,7 @@ def test_execute_cases_flags_blocked_environment(
     store.create_case(
         project["id"],
         title="unreachable service",
+        status="ready",
         api={
             "request": {"method": "GET", "path": "/api/products"},
             "assertions": [{"type": "status", "expect": 200}],
