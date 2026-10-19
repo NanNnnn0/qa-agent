@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DispatchDeskProvider } from "@/components/dispatch/DispatchDeskProvider";
 import {
@@ -155,6 +155,119 @@ describe("dispatch desk click path", () => {
     expect(within(dialog).queryByRole("button", { name: /Active check/ })).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Failed", exact: true }));
     expect(within(dialog).getByRole("button", { name: /Broken check/ })).toBeInTheDocument();
+  });
+
+  it("archives a task off the rail and restores it from the archived list", async () => {
+    const tasks = [
+      task({
+        id: "archivable",
+        title: "Archivable check",
+        status: "running",
+        sessionKey: "websocket:archivable",
+      }),
+    ];
+    render(
+      <DispatchDeskProvider
+        persist={false}
+        initialTasks={tasks}
+        onOpenSession={() => {}}
+        onGoHome={() => {}}
+      >
+        <DispatchRail activeKey={null} />
+      </DispatchDeskProvider>,
+    );
+
+    const rail = screen.getByRole("region", { name: "Dispatch desk" });
+    expect(within(rail).getByRole("button", { name: /Archivable check/ })).toBeInTheDocument();
+
+    fireEvent.pointerDown(
+      within(rail).getByRole("button", { name: "任务操作" }),
+      { button: 0, ctrlKey: false },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
+
+    expect(within(rail).queryByRole("button", { name: /Archivable check/ })).not.toBeInTheDocument();
+
+    fireEvent.click(within(rail).getByRole("button", { name: "All tasks" }));
+    const dialog = screen.getByRole("dialog", { name: "All tasks" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "已归档", exact: true }));
+    expect(within(dialog).getByRole("button", { name: /Archivable check/ }))
+      .toHaveTextContent("已归档");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "恢复", exact: true }));
+    expect(within(dialog).queryByRole("button", { name: /Archivable check/ })).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "全部", exact: true }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "In progress", exact: true }));
+    expect(within(dialog).getByRole("button", { name: /Archivable check/ })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(await within(rail).findByRole("button", { name: /Archivable check/ })).toBeInTheDocument();
+  });
+
+  it("follows the chat session instead of freezing the dispatch status", async () => {
+    const createdAt = Date.parse("2026-01-01T00:00:00.000Z");
+    const tasks = [
+      task({ id: "live", title: "Live check", status: "running", createdAt, sessionKey: "websocket:live" }),
+      task({ id: "settled", title: "Settled check", status: "running", createdAt, sessionKey: "websocket:settled" }),
+    ];
+    render(
+      <DispatchDeskProvider
+        persist={false}
+        initialTasks={tasks}
+        sessions={[
+          { key: "websocket:live", runStartedAt: Math.floor(Date.now() / 1000) - 5, updatedAt: "2026-01-01T00:00:05.000Z" },
+          { key: "websocket:settled", runStartedAt: null, updatedAt: "2026-01-01T00:01:00.000Z" },
+        ]}
+        onOpenSession={() => {}}
+        onGoHome={() => {}}
+      >
+        <DispatchRail activeKey={null} />
+      </DispatchDeskProvider>,
+    );
+
+    const rail = screen.getByRole("region", { name: "Dispatch desk" });
+    expect(within(rail).getByRole("button", { name: /Live check/ })).toHaveTextContent("In progress");
+    expect(within(rail).queryByRole("button", { name: /Settled check/ })).not.toBeInTheDocument();
+
+    fireEvent.click(within(rail).getByRole("button", { name: "All tasks" }));
+    const dialog = screen.getByRole("dialog", { name: "All tasks" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done", exact: true }));
+    expect(within(dialog).getByRole("button", { name: /Settled check/ })).toHaveTextContent("Done");
+    fireEvent.click(within(dialog).getByRole("button", { name: "In progress", exact: true }));
+    expect(within(dialog).getByRole("button", { name: /Live check/ })).toHaveTextContent("In progress");
+  });
+
+  it("mirrors archive and restore onto the task's chat session", async () => {
+    const onArchiveSession = vi.fn();
+    const tasks = [
+      task({ id: "mirror", title: "Mirror check", status: "running", sessionKey: "websocket:mirror" }),
+    ];
+    render(
+      <DispatchDeskProvider
+        persist={false}
+        initialTasks={tasks}
+        onOpenSession={() => {}}
+        onGoHome={() => {}}
+        onArchiveSession={onArchiveSession}
+      >
+        <DispatchRail activeKey={null} />
+      </DispatchDeskProvider>,
+    );
+
+    const rail = screen.getByRole("region", { name: "Dispatch desk" });
+    fireEvent.pointerDown(
+      within(rail).getByRole("button", { name: "任务操作" }),
+      { button: 0, ctrlKey: false },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "归档" }));
+    expect(onArchiveSession).toHaveBeenCalledWith("websocket:mirror", true);
+
+    fireEvent.click(within(rail).getByRole("button", { name: "All tasks" }));
+    const dialog = screen.getByRole("dialog", { name: "All tasks" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "已归档", exact: true }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "恢复", exact: true }));
+    expect(onArchiveSession).toHaveBeenCalledWith("websocket:mirror", false);
   });
 
   it("shows a failed dispatch on the home desk when no topic was created", () => {

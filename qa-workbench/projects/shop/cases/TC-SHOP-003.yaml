@@ -1,0 +1,41 @@
+schema_version: 1
+id: TC-SHOP-003
+code: SHOP-API-003
+legacy_id: case_20543cc753ce
+title: 库存不足时下单被拒绝（code=1001）
+testpoints:
+- TP-SHOP-004
+priority: P0
+type: api
+status: reviewed
+steps:
+- action: POST /api/orders
+  expected: 返回 400 + 业务码 1001，不创建订单
+automation:
+  status: todo
+preconditions: 商品 A-1 库存为 5
+expected: 返回 400 + 业务码 1001，不创建订单
+api:
+  assertions:
+  - expect: 400
+    type: status
+  - expect: 1001
+    op: equals
+    path: $.code
+    type: json_path
+  request:
+    body:
+      qty: 999
+      sku: A-1
+    headers:
+      Content-Type: application/json
+    method: POST
+    path: /api/orders
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_20543cc753ce
+tags:
+- order
+- negative
+source: ai

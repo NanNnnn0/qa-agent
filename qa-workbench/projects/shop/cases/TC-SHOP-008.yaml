@@ -1,0 +1,25 @@
+schema_version: 1
+id: TC-SHOP-008
+code: SHOP-UI-002
+legacy_id: case_d1145d885706
+title: 库存不足时前端拦截结算
+testpoints:
+- TP-SHOP-004
+priority: P1
+type: ui
+status: reviewed
+steps:
+- action: 点击【去结算】
+  expected: 提示库存不足，停留在购物车
+- action: 刷新页面
+  expected: 商品仍在购物车，未生成订单
+automation:
+  status: manual
+preconditions: 购物车含库存为 0 的商品
+expected: 不创建订单，错误提示可理解
+owner: qa-agent
+note: migrated from the legacy SQLite case case_d1145d885706
+tags:
+- cart
+- negative
+source: ai

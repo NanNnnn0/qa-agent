@@ -1,0 +1,15 @@
+schema_version: 1
+id: TP-SHOP-001
+module: SHOP
+title: 商品列表查询返回结构
+sources:
+- EX-SHOP-01
+method: equivalence
+risk: medium
+status: reviewed
+owner: qa-agent
+tags:
+- shop
+- catalog
+- api
+note: 覆盖 TC-SHOP-001（SHOP-API-001）：GET /api/products 返回 200、code=0、items 为数组

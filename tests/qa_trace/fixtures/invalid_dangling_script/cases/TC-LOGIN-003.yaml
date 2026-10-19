@@ -1,0 +1,16 @@
+schema_version: 1
+id: TC-LOGIN-003
+module: LOGIN
+title: 绑定的脚本文件不存在
+testpoints:
+  - TP-LOGIN-005
+priority: P1
+type: functional
+status: reviewed
+steps:
+  - action: 连续输错密码 5 次
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: done
+  script: scripts/test_missing.py::test_lock_after_5_failures
+owner: qa.zhang

@@ -452,12 +452,20 @@ export interface ChatSummary {
   /** Durable recovery state that needs attention after an interrupted turn. */
   recoveryState?: RecoveryState | null;
   workspaceScope?: WorkspaceScopePayload | null;
+  /** QA project explicitly bound to this chat; null when unbound. */
+  qaProject?: QaProjectBinding | null;
   /** Stable, server-owned @handle for this session. */
   handle?: SessionHandle | null;
 }
 
 export type WorkspaceAccessMode = "restricted" | "full";
 export type WebuiDefaultAccessMode = "default" | "full";
+
+export interface QaProjectBinding {
+  id: string;
+  key: string;
+  name: string;
+}
 
 export interface WorkspaceScopePayload {
   project_path: string;
@@ -1604,6 +1612,7 @@ export type InboundEvent =
       chat_id: string;
       scope?: "metadata" | "thread" | string;
       workspace_scope?: WorkspaceScopePayload;
+      qa_project?: QaProjectBinding | null;
     }
   | {
       event: "sidebar_state_updated";
@@ -1751,6 +1760,7 @@ export type Outbound =
   | { type: "set_sidebar_state"; state: SidebarStatePayload }
   | { type: "discard_temporary_chat"; chat_id: string }
   | { type: "set_workspace_scope"; chat_id: string; workspace_scope: WorkspaceScopePayload }
+  | { type: "set_qa_project"; chat_id: string; project_id: string | null }
   | { type: "transcribe_audio"; request_id: string; data_url: string; duration_ms?: number }
   | {
       type: "message";

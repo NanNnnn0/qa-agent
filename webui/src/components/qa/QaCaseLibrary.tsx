@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, Plus, Upload } from "lucide-react";
+import { Archive, BadgeCheck, Download, Plus, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,11 +14,13 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  archiveQaCase,
   createQaCase,
   importQaCases,
   loadQaCase,
   loadQaCaseExport,
   loadQaCases,
+  markQaCaseReviewed,
   qaErrorMessage,
   updateQaCase,
   type QaCase,
@@ -35,6 +37,7 @@ import { cn } from "@/lib/utils";
 import { QaDetailDrawer, QaDetailField, QaDetailSection } from "./QaDetailDrawer";
 import {
   formatQaTime,
+  QaBadge,
   QaCaseStatusBadge,
   QaEmptyState,
   QaErrorBar,
@@ -55,6 +58,74 @@ import { useQaDebouncedValue, useQaQuery } from "./useQaQuery";
 const CASE_KINDS: QaCaseKind[] = ["api", "ui", "manual"];
 const CASE_PRIORITIES: QaCasePriority[] = ["P0", "P1", "P2", "P3"];
 const CASE_STATUSES: QaCaseStatus[] = ["draft", "ready", "deprecated"];
+/** Archiving is a delete, so the write forms only offer draft/reviewed. */
+const CASE_EDIT_STATUSES: QaCaseStatus[] = ["draft", "ready"];
+const CASE_RISKS = ["", "high", "medium", "low"] as const;
+
+/** The case library speaks the trace vocabulary: reviewed, archived. */
+function caseStatusLabel(
+  status: QaCaseStatus,
+  tx: ReturnType<typeof useQaCopy>,
+): string {
+  if (status === "draft") return tx("qa.cases.statusDraft", "草稿");
+  if (status === "ready") return tx("qa.cases.statusReviewed", "已评审");
+  return tx("qa.cases.statusArchived", "已归档");
+}
+
+function splitIds(value: string): string[] {
+  return value
+    .split(/[,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Chain badges of one case: 来源 / 测试点 / 脚本 / 需复核.
+ *
+ * Read-only display: editing the links happens in the drawer, but the table has
+ * to show at a glance whether a case is traceable at all (a migrated SQLite case
+ * starts with no source and no test point, so it cannot be reviewed).
+ */
+function QaCaseChain({ item }: { item: QaCase }) {
+  const tx = useQaCopy();
+  const sources = item.sources ?? [];
+  const testpoints = item.testpoints ?? [];
+  return (
+    <div className="flex flex-wrap items-center gap-1" data-testid="qa-case-chain">
+      <QaBadge
+        tone={sources.length ? "blue" : "neutral"}
+        title={sources.join(", ") || tx("qa.cases.chainNoSource", "缺少来源")}
+      >
+        {sources.length
+          ? `${tx("qa.cases.chainSource", "来源")} ${sources.length}`
+          : tx("qa.cases.chainNoSource", "缺少来源")}
+      </QaBadge>
+      <QaBadge
+        tone={testpoints.length ? "violet" : "neutral"}
+        title={testpoints.join(", ") || tx("qa.cases.chainNoTestpoint", "缺少测试点")}
+      >
+        {testpoints.length
+          ? `${tx("qa.cases.chainTestpoint", "测试点")} ${testpoints.length}`
+          : tx("qa.cases.chainNoTestpoint", "缺少测试点")}
+      </QaBadge>
+      {item.script ? (
+        <QaBadge tone="green" title={item.script.binding}>
+          {tx("qa.cases.chainScript", "脚本")}
+        </QaBadge>
+      ) : null}
+      {item.needs_recheck ? (
+        <QaBadge tone="amber" title={(item.recheck_reasons ?? []).join(", ")}>
+          {tx("qa.cases.chainRecheck", "需复核")}
+        </QaBadge>
+      ) : null}
+      {item.draft ? (
+        <QaBadge tone="neutral" title={item.yaml_path ?? ""}>
+          {tx("qa.cases.chainDraft", "草稿区")}
+        </QaBadge>
+      ) : null}
+    </div>
+  );
+}
 
 export interface QaCaseLibraryProps {
   token: string;
@@ -62,6 +133,7 @@ export interface QaCaseLibraryProps {
   projects: QaProject[];
   refreshSignal: number;
   onChanged: () => void;
+  initialProjectId?: string;
 }
 
 export function QaCaseLibrary({
@@ -70,9 +142,13 @@ export function QaCaseLibrary({
   projects,
   refreshSignal,
   onChanged,
+  initialProjectId = "all",
 }: QaCaseLibraryProps) {
   const tx = useQaCopy();
-  const [projectId, setProjectId] = useState<string>("all");
+  const [projectId, setProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [kind, setKind] = useState<string>("all");
   const [status, setStatus] = useState<string>("all");
   const [search, setSearch] = useState("");
@@ -205,11 +281,7 @@ export function QaCaseLibrary({
             <SelectItem value="all">{tx("qa.filters.allStatus", "全部状态")}</SelectItem>
             {CASE_STATUSES.map((value) => (
               <SelectItem key={value} value={value}>
-                {value === "draft"
-                  ? tx("qa.caseStatus.draft", "草稿")
-                  : value === "ready"
-                    ? tx("qa.caseStatus.ready", "就绪")
-                    : tx("qa.caseStatus.deprecated", "已废弃")}
+                {caseStatusLabel(value, tx)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -262,6 +334,7 @@ export function QaCaseLibrary({
               <th className={QA_TH_CLASS}>{tx("qa.cases.kind", "类型")}</th>
               <th className={QA_TH_CLASS}>{tx("qa.cases.priority", "优先级")}</th>
               <th className={QA_TH_CLASS}>{tx("qa.cases.status", "状态")}</th>
+              <th className={QA_TH_CLASS}>{tx("qa.cases.chain", "链路")}</th>
               <th className={QA_TH_CLASS}>{tx("qa.cases.tags", "标签")}</th>
             </tr>
           </thead>
@@ -296,6 +369,9 @@ export function QaCaseLibrary({
                 </td>
                 <td className={QA_TD_CLASS}>
                   <QaCaseStatusBadge status={item.status} />
+                </td>
+                <td className={QA_TD_CLASS}>
+                  <QaCaseChain item={item} />
                 </td>
                 <td className={QA_TD_CLASS}>
                   <QaTagChips tags={item.tags} />
@@ -414,6 +490,10 @@ function QaCaseDrawer({
   const [stepsText, setStepsText] = useState("");
   const [apiText, setApiText] = useState("{}");
   const [tagsText, setTagsText] = useState("");
+  const [testpointsText, setTestpointsText] = useState("");
+  const [sourcesText, setSourcesText] = useState("");
+  const [directReason, setDirectReason] = useState("");
+  const [risk, setRisk] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [savedAt, setSavedAt] = useState("");
@@ -430,12 +510,16 @@ function QaCaseDrawer({
     setStepsText(stepsToText(current.steps));
     setApiText(JSON.stringify(current.api ?? {}, null, 2));
     setTagsText(current.tags.join(", "));
+    setTestpointsText((current.testpoints ?? []).join(", "));
+    setSourcesText((current.sources ?? []).join(", "));
+    setDirectReason(current.direct_reason ?? "");
+    setRisk(current.risk ?? "");
     setError("");
     setSavedAt("");
     // Reset the form only when a different case is opened.
   }, [loadedId]);
 
-  const save = async () => {
+  const submit = async (nextStatus?: QaCaseStatus) => {
     if (!current || busy) return;
     let parsedApi: QaCaseApi;
     try {
@@ -448,19 +532,53 @@ function QaCaseDrawer({
     setBusy(true);
     setError("");
     try {
-      await updateQaCase(client, current.id, {
+      const fields = {
         title: title.trim(),
         kind,
         priority,
-        status,
+        status: nextStatus ?? status,
         preconditions,
         expected,
         steps: textToSteps(stepsText),
         api: parsedApi,
         tags: tagsText.split(",").map((tag) => tag.trim()).filter(Boolean),
-      });
-      setSavedAt(tx("qa.cases.saved", "已保存"));
+        testpoints: splitIds(testpointsText),
+        sources: splitIds(sourcesText),
+        direct_reason: directReason.trim() || undefined,
+        risk: risk || undefined,
+      };
+      const saved = nextStatus === "ready"
+        ? await markQaCaseReviewed(client, current.id, fields)
+        : await updateQaCase(client, current.id, fields);
+      if (nextStatus === "ready") {
+        setStatus("ready");
+        setSavedAt(
+          saved.draft
+            ? tx(
+                "qa.cases.reviewedStillDraft",
+                "已标记为已评审；用例仍缺测试点/来源，文件留在草稿区。",
+              )
+            : tx("qa.cases.reviewed", "已标记为已评审，文件已进入正式用例库。"),
+        );
+      } else {
+        setSavedAt(tx("qa.cases.saved", "已保存"));
+      }
       detail.reload();
+      onSaved();
+    } catch (reason) {
+      setError(qaErrorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archive = async () => {
+    if (!current || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await archiveQaCase(client, current.id);
+      onOpenChange(false);
       onSaved();
     } catch (reason) {
       setError(qaErrorMessage(reason));
@@ -505,6 +623,28 @@ function QaCaseDrawer({
                 {savedAt}
               </span>
             ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              className="gap-1.5"
+              disabled={busy}
+              data-testid="qa-case-archive"
+              onClick={() => void archive()}
+            >
+              <Archive className="h-3.5 w-3.5" aria-hidden />
+              {tx("qa.cases.archive", "归档")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              disabled={busy}
+              data-testid="qa-case-review"
+              onClick={() => void submit("ready")}
+            >
+              <BadgeCheck className="h-3.5 w-3.5" aria-hidden />
+              {tx("qa.cases.markReviewed", "标记为已评审")}
+            </Button>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               {tx("qa.actions.close", "关闭")}
             </Button>
@@ -512,7 +652,7 @@ function QaCaseDrawer({
               type="button"
               disabled={busy}
               data-testid="qa-case-save"
-              onClick={() => void save()}
+              onClick={() => void submit()}
             >
               {tx("qa.actions.save", "保存")}
             </Button>
@@ -575,13 +715,9 @@ function QaCaseDrawer({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {CASE_STATUSES.map((value) => (
+                      {CASE_EDIT_STATUSES.map((value) => (
                         <SelectItem key={value} value={value}>
-                          {value === "draft"
-                            ? tx("qa.caseStatus.draft", "草稿")
-                            : value === "ready"
-                              ? tx("qa.caseStatus.ready", "就绪")
-                              : tx("qa.caseStatus.deprecated", "已废弃")}
+                          {caseStatusLabel(value, tx)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -642,6 +778,75 @@ function QaCaseDrawer({
               disabled={busy}
               data-testid="qa-case-api-input"
             />
+          </QaDetailSection>
+
+          <QaDetailSection
+            title={tx("qa.cases.chainSection", "追溯链路")}
+            hint={tx(
+              "qa.cases.chainHint",
+              "用例必须挂到测试点或来源，才能从草稿区进入正式用例库。",
+            )}
+          >
+            <div className="grid gap-3">
+              <QaCaseChain item={current} />
+              <div className="grid grid-cols-2 gap-2">
+                <QaDetailField label={tx("qa.cases.fieldTestpoints", "测试点（逗号分隔）")}>
+                  <Input
+                    value={testpointsText}
+                    onChange={(event) => setTestpointsText(event.target.value)}
+                    aria-label={tx("qa.cases.fieldTestpoints", "测试点（逗号分隔）")}
+                    placeholder="TP-LOGIN-005"
+                    className="font-mono text-[12px]"
+                    disabled={busy}
+                    data-testid="qa-case-testpoints"
+                  />
+                </QaDetailField>
+                <QaDetailField label={tx("qa.cases.fieldSources", "来源（逗号分隔）")}>
+                  <Input
+                    value={sourcesText}
+                    onChange={(event) => setSourcesText(event.target.value)}
+                    aria-label={tx("qa.cases.fieldSources", "来源（逗号分隔）")}
+                    placeholder="REQ-LOGIN-01"
+                    className="font-mono text-[12px]"
+                    disabled={busy}
+                    data-testid="qa-case-sources"
+                  />
+                </QaDetailField>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <QaDetailField label={tx("qa.cases.fieldRisk", "风险")}>
+                  <Select value={risk || "none"} onValueChange={(value) => setRisk(value === "none" ? "" : value)}>
+                    <SelectTrigger aria-label={tx("qa.cases.fieldRisk", "风险")} className="h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{tx("qa.cases.riskNone", "—")}</SelectItem>
+                      {CASE_RISKS.filter(Boolean).map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </QaDetailField>
+                <QaDetailField label={tx("qa.cases.fieldDirectReason", "直挂来源的理由")}>
+                  <Input
+                    value={directReason}
+                    onChange={(event) => setDirectReason(event.target.value)}
+                    aria-label={tx("qa.cases.fieldDirectReason", "直挂来源的理由")}
+                    disabled={busy}
+                  />
+                </QaDetailField>
+              </div>
+              {current.legacy ? (
+                <p className="text-[12px] text-amber-700 dark:text-amber-300">
+                  {tx(
+                    "qa.cases.legacyHint",
+                    "这是尚未迁移的 SQLite 用例，只读；请运行 qa trace migrate-sqlite 后再编辑。",
+                  )}
+                </p>
+              ) : null}
+            </div>
           </QaDetailSection>
         </>
       )}
@@ -789,13 +994,9 @@ function QaCaseCreateDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {CASE_STATUSES.map((value) => (
+                  {CASE_EDIT_STATUSES.map((value) => (
                     <SelectItem key={value} value={value}>
-                      {value === "draft"
-                        ? tx("qa.caseStatus.draft", "草稿")
-                        : value === "ready"
-                          ? tx("qa.caseStatus.ready", "就绪")
-                          : tx("qa.caseStatus.deprecated", "已废弃")}
+                      {caseStatusLabel(value, tx)}
                     </SelectItem>
                   ))}
                 </SelectContent>

@@ -1,0 +1,5 @@
+schema_version: 1
+project_id: marker-extra
+name: P2 marker lint fixture - markers no case owns
+modules:
+  - LOGIN

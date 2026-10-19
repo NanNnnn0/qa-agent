@@ -1,0 +1,26 @@
+# qa-trace P5: the fast trace check runs before every commit (spec section 5.6:
+# pre-commit runs the fast lint, a pull request runs the full check plus the
+# report diff).  Local hooks only, so this file is self-contained and needs no
+# remote repository or network access.
+#
+# Install once:  pip install pre-commit && pre-commit install
+# Run manually:  pre-commit run --all-files
+#
+# The hook uses `language: system`, so `python` must be the interpreter that can
+# import `qa_trace`: run pre-commit from the project virtualenv, or install the
+# package with `pip install -e .` (that also creates the `qa` command).
+#
+# It checks the demo project `qa-workbench/projects/login-lock` with an explicit
+# path, so NANOBOT_QA_TRACE_ROOT is not needed here.  Drafts are excluded by
+# default: an unfinished draft batch cannot block a commit.
+
+repos:
+  - repo: local
+    hooks:
+      - id: qa-trace-check
+        name: qa trace check (demo project, fast)
+        entry: python -m qa_trace trace check --project qa-workbench/projects/login-lock
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: ^(qa_trace/|qa-workbench/projects/|tests/qa_trace/)

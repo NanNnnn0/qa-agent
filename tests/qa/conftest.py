@@ -13,6 +13,24 @@ import pytest
 from nanobot.qa import demo_server
 from nanobot.qa.store import QaStore
 
+#: The committed demo project ships an intentionally failing pytest script; it is
+#: data for the trace tests, not part of the QA suite (its assertion is meant to
+#: produce the recorded failure manifest).
+collect_ignore_glob = ["fixtures/trace/*/scripts/*"]
+
+
+@pytest.fixture(autouse=True)
+def qa_case_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the YAML case library at a per-test directory.
+
+    Cases are files now, so every test must write them somewhere disposable;
+    ``NANOBOT_QA_TRACE_ROOT`` is the documented override and the adapter reads it
+    on each call.
+    """
+    root = tmp_path / "qa-workbench" / "projects"
+    monkeypatch.setenv("NANOBOT_QA_TRACE_ROOT", str(root))
+    return root
+
 
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[QaStore]:

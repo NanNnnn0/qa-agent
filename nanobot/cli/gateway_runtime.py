@@ -43,6 +43,9 @@ from nanobot.cli.webui_support import (
 from nanobot.config.paths import is_default_workspace
 from nanobot.config.schema import Config
 from nanobot.gateway.runtime import GatewayInstance
+from nanobot.qa import shared_store
+from nanobot.qa.chat_context import qa_project_context
+from nanobot.qa.scheduler import QaScheduler
 from nanobot.security.network import is_loopback_host
 from nanobot.session.keys import (
     HEARTBEAT_SESSION_KEY,
@@ -558,6 +561,7 @@ def _run_gateway(
         tool_registry=tools,
         recovery_admission=recovery,
     )
+    agent.register_runtime_context_provider(qa_project_context)
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))
 
@@ -948,6 +952,8 @@ def _run_gateway(
         runtime_tasks: asyncio.Future[list[Any]] | None = None
         startup_complete = False
         shutdown_event = asyncio.Event()
+        # QA schedules are evaluated by the gateway, not by a browser tab.
+        qa_scheduler = QaScheduler(shared_store())
         cli_terminal._ensure_interactive_tty_mode()
         restore_shutdown_handlers = _install_gateway_shutdown_handlers(
             asyncio.get_running_loop(),
@@ -958,6 +964,7 @@ def _run_gateway(
         try:
             await agent.subagents.recover_interrupted()
             await cron.start()
+            qa_scheduler.start()
             # Re-read once on first admission to close the watcher subscription window.
             agent.runtime_resolver.invalidate()
             # Recovery must finish before WebSocket and other channels begin
@@ -1051,6 +1058,7 @@ def _run_gateway(
                     with suppress(asyncio.CancelledError):
                         await shutdown_task
                 cron.stop()
+                await qa_scheduler.stop()
                 # A gateway exit interrupts ownership of active turns; it is
                 # not the same as the user stopping a turn.  Keep checkpoints
                 # so the next gateway can offer an explicit Continue action.

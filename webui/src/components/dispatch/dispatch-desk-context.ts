@@ -9,6 +9,8 @@ export interface DispatchDeskApi {
   setAllTasksOpen: (open: boolean) => void;
   startDispatch: (prompt: string) => string;
   finishDispatch: (id: string, sessionKey: string | null) => void;
+  archiveTask: (id: string) => void;
+  restoreTask: (id: string) => void;
   selectTask: (id: string) => void;
   selectDispatcher: () => void;
   clearFocus: () => void;

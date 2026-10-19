@@ -1,0 +1,13 @@
+schema_version: 1
+id: REQ-LOGIN-02
+type: req
+module: LOGIN
+title: 登录错误提示文案
+evidence:
+  - type: document
+    locator: docs/req/login-copy.md#4.1
+    description: 需求文档 4.1 节：错误提示文案表
+    verified: external_unverified
+confidence: confirmed
+status: active
+owner: qa.zhang

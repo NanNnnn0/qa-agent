@@ -1,0 +1,16 @@
+schema_version: 1
+id: TC-LOGIN-010
+module: LOGIN
+title: 锁定后剩余时间倒计时
+testpoints:
+  - TP-LOGIN-005
+priority: P2
+type: functional
+status: draft
+steps:
+  - action: 第 5 次错误后等待 1 分钟
+    expected: 提示中的剩余时间 = 14 分钟
+automation:
+  status: manual
+owner: qa.li
+note: 草稿批次 default 的新用例

@@ -1,0 +1,41 @@
+schema_version: 1
+id: TC-SHOP-004
+code: SHOP-API-004
+legacy_id: case_11f6b2b8c9b1
+title: 数量非法（qty=0）返回参数错误 1000
+testpoints:
+- TP-SHOP-003
+priority: P1
+type: api
+status: reviewed
+steps:
+- action: POST /api/orders
+  expected: 参数校验生效
+automation:
+  status: todo
+expected: 参数校验生效
+api:
+  assertions:
+  - expect: 400
+    type: status
+  - expect: 1000
+    op: equals
+    path: $.code
+    type: json_path
+  request:
+    body:
+      qty: 0
+      sku: A-1
+    headers:
+      Content-Type: application/json
+    method: POST
+    path: /api/orders
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_11f6b2b8c9b1
+tags:
+- order
+- negative
+- boundary
+source: ai

@@ -20,13 +20,14 @@ from typing import Any, cast
 from loguru import logger
 
 from nanobot.config.paths import get_webui_dir
+from nanobot.qa.chat_context import qa_project_from_metadata
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.manager import (
     _SESSION_LIST_PREVIEW_MAX_CHARS,  # pyright: ignore[reportPrivateUsage]
     _SESSION_LIST_PREVIEW_MAX_RECORDS,  # pyright: ignore[reportPrivateUsage]
     SessionManager,
     message_preview_text,  # pyright: ignore[reportPrivateUsage]
-    )
+)
 from nanobot.session.model_selection import (
     model_preset_from_metadata,
     reasoning_effort_from_metadata,
@@ -112,7 +113,7 @@ def _reconcile_index(
             continue
         signature = activity_by_stem.get(os.path.normcase(SessionManager.safe_key(row["key"])))
         activity = _webui_activity_updated_at(signature) if signature is not None else None
-        rows.append({
+        session_row = {
             "key": row["key"], "created_at": row["created_at"],
             "updated_at": _visible_activity_updated_at(row["updated_at"], row["visible_updated_at"], activity),
             "title": row["title"], "preview": row["preview"],
@@ -121,7 +122,11 @@ def _reconcile_index(
             "recovery_state": recovery_state_from_metadata(metadata),
             **_indexed_workspace_scope_fields(metadata),
             _ROW_SOURCE_FIELD: _SESSION_SOURCE, "file": "sessions.sqlite3",
-        })
+        }
+        binding = qa_project_from_metadata(metadata)
+        if binding is not None:
+            session_row["qa_project"] = binding
+        rows.append(session_row)
 
     transcripts = [
         (stem, files) for stem, files in sorted(files_by_stem.items())

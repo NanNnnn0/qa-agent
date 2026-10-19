@@ -1,0 +1,19 @@
+schema_version: 1
+id: UI-LOGIN-02
+type: ui
+module: LOGIN
+title: 登录失败 5 次触发账号锁定
+evidence:
+  - type: ui_capture
+    locator: artifacts/ui/login-lock-5x.png
+    description: 第 5 次错误后的锁定提示截图
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    verified: verified_local
+url: /login
+app_version: 3.4.1
+observed_at: 2026-10-18
+confidence: confirmed
+stale: false
+status: active
+owner: qa.zhang
+note: 提示文案与 423 状态码在文档中未提及

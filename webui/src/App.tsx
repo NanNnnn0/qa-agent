@@ -1322,6 +1322,10 @@ function Shell({
     settingsExitGuardRef.current = guard;
   }, []);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [qaProjects, setQaProjects] = useState<
+    Array<{ id: string; key: string; name: string }> | null
+  >(null);
+  const qaProjectsRef = useRef<Array<{ id: string; key: string; name: string }> | null>(null);
   const [draftWorkspaceScope, setDraftWorkspaceScope] =
     useState<WorkspaceScopePayload | null>(null);
   const [workspaceOverrides, setWorkspaceOverrides] =
@@ -1759,6 +1763,28 @@ function Shell({
     [activeChatId, activeChatRunning, activeKey, client, temporaryChatActive],
   );
 
+  const loadQaProjects = useCallback(async () => {
+    if (qaProjectsRef.current) return qaProjectsRef.current;
+    const { loadQaProjects: fetchQaProjects } = await import("@/lib/qa-api");
+    const list = (await fetchQaProjects(getToken())).map((project) => ({
+      id: project.id,
+      key: project.key,
+      name: project.name,
+    }));
+    qaProjectsRef.current = list;
+    setQaProjects(list);
+    return list;
+  }, [getToken]);
+
+  const applyQaProject = useCallback(
+    (projectId: string | null) => {
+      if (!activeChatId || temporaryChatActive) return;
+      client.setQaProject(activeChatId, projectId);
+      refresh();
+    },
+    [activeChatId, temporaryChatActive, client, refresh],
+  );
+
   const onCreateChat = useCallback(async (
     workspaceScope?: WorkspaceScopePayload | null,
     _initialMessage?: string,
@@ -2114,6 +2140,15 @@ function Shell({
       }
     },
     [activeKey, navigate, sidebarState.archived_keys, topicSessions, updateSidebarState],
+  );
+
+  const setSessionArchived = useCallback(
+    (key: string, archived: boolean) => {
+      // Archiving a dispatch row must mirror onto its chat exactly once.
+      if (sidebarState.archived_keys.includes(key) === archived) return;
+      onToggleArchive(key);
+    },
+    [onToggleArchive, sidebarState.archived_keys],
   );
 
   const onToggleArchived = useCallback(() => {
@@ -2872,6 +2907,8 @@ function Shell({
         onOpenSession={onSelectChat}
         onGoHome={onNewChat}
         homeActionRef={dispatchHomeRef}
+        sessions={topicSessions}
+        onArchiveSession={setSessionArchived}
       >
       <StarPrompt ready={localActive && !managingConnections && !loading && !sidebarStateLoading} />
       <div
@@ -3074,6 +3111,10 @@ function Shell({
                             workspaceScopeDisabled={activeChatRunning}
                             workspaceError={workspaceError}
                             onWorkspaceScopeChange={applyWorkspaceScope}
+                            qaProject={activeSession?.qaProject ?? null}
+                            qaProjects={qaProjects}
+                            onLoadQaProjects={loadQaProjects}
+                            onQaProjectChange={applyQaProject}
                             settingsSnapshot={settingsSnapshot}
                             settingsLoading={settingsLoading}
                             onOpenModelSettings={onOpenModelSettings}
@@ -3159,6 +3200,7 @@ function Shell({
                   <Suspense fallback={<SurfaceLoadingFallback />}>
                     <QaWorkbench
                       token={getToken()}
+                      initialProjectId={activeSession?.qaProject?.id ?? "all"}
                       client={client}
                       onBackToChat={onBackToChat}
                     />

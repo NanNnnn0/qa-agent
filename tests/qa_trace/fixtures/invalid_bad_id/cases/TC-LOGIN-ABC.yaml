@@ -1,0 +1,13 @@
+schema_version: 1
+id: TC-LOGIN-ABC
+title: 序列号不是数字也不是 UUID4
+testpoints:
+  - TP-LOGIN-005
+priority: P1
+type: functional
+status: draft
+steps:
+  - action: 打开登录页
+    expected: 登录页标题显示“登录”
+automation:
+  status: manual

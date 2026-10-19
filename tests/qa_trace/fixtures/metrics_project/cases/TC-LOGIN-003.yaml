@@ -1,0 +1,17 @@
+schema_version: 1
+id: TC-LOGIN-003
+module: LOGIN
+title: 提示文案的边界长度
+testpoints:
+  - TP-LOGIN-002
+priority: P0
+type: functional
+status: draft
+steps:
+  - action: 输入 64 个字符的用户名与错误密码
+    expected: 提示文案等于“用户名或密码错误”，HTTP 状态码 401
+automation:
+  status: manual
+owner: qa.li
+tags:
+  - login

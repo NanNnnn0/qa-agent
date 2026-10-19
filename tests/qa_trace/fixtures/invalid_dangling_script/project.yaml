@@ -1,0 +1,3 @@
+schema_version: 1
+project_id: dangling-script
+name: Invalid fixture - automation.script points at a missing file

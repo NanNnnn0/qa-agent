@@ -1,0 +1,13 @@
+schema_version: 1
+id: TC-LOGIN-003
+title: 直接挂来源但没有说明原因
+sources:
+  - UI-LOGIN-02
+priority: P1
+type: functional
+status: draft
+steps:
+  - action: 连续输错密码 5 次
+    expected: HTTP 状态码 423
+automation:
+  status: manual

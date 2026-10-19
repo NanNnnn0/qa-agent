@@ -67,6 +67,41 @@ def qa_projects() -> None:
     _print({"projects": _store().list_projects()})
 
 
+@qa_app.command("reindex")
+def qa_reindex(
+    project: str | None = typer.Option(
+        None, "--project", help="Project key or id (default: every project)."
+    ),
+    root: Path | None = typer.Option(
+        None, "--root", help="Trace project root (default: NANOBOT_QA_TRACE_ROOT)."
+    ),
+) -> None:
+    """Rebuild the SQLite case index from the YAML case library.
+
+    YAML is the source of truth for cases: this command repopulates the derived
+    ``cases`` rows after a hand edit, a git pull or a migration.  It never touches
+    the hand-written (legacy) rows, which stay readable until migrated.
+    """
+    from nanobot.qa.case_files import reindex_cases
+    from nanobot.qa.validation import QaError
+
+    store = _store()
+    project_id = None
+    project_key = None
+    if project:
+        if project.startswith("proj_"):
+            project_id = project
+        else:
+            project_key = project
+    try:
+        report = reindex_cases(
+            store, root=root, project_key=project_key, project_id=project_id
+        )
+    except QaError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _print({"store": str(store.path), **report})
+
+
 @qa_app.command("cases")
 def qa_cases(
     project: str | None = typer.Option(None, "--project", help="Project key or id."),

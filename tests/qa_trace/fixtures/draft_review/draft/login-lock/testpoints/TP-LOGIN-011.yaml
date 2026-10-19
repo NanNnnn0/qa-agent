@@ -1,0 +1,11 @@
+schema_version: 1
+id: TP-LOGIN-011
+module: LOGIN
+title: 锁定阈值边界（4 次不锁定）
+sources:
+  - UI-LOGIN-02
+method: boundary
+risk: high
+status: draft
+owner: qa.li
+note: 草稿批次 login-lock 的新测试点

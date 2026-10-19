@@ -1,0 +1,20 @@
+schema_version: 1
+id: TC-LOGIN-004
+module: LOGIN
+title: 缺陷回归：锁定后再次登录被拒绝
+sources:
+  - BUG-LOGIN-01
+direct_reason: 缺陷回归补充用例，没有独立测试点
+priority: P2
+type: functional
+status: reviewed
+risk: high
+steps:
+  - action: 账号锁定后立即用正确密码登录
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: manual
+owner: qa.zhang
+tags:
+  - login
+  - regression

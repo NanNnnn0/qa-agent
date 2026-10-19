@@ -1,0 +1,5 @@
+schema_version: 1
+project_id: stale-demo
+name: Stale propagation fixture
+modules:
+  - LOGIN

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Pencil, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +16,7 @@ import {
   createQaProject,
   loadQaOverview,
   qaErrorMessage,
+  updateQaProject,
   type QaMutationTransport,
   type QaProject,
 } from "@/lib/qa-api";
@@ -67,6 +68,7 @@ export function QaOverview({
   const tx = useQaCopy();
   const visible = usePageVisibility();
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<QaProject | null>(null);
   const overview = useQaQuery(
     () => loadQaOverview(token),
     [token, refreshSignal],
@@ -203,6 +205,9 @@ export function QaOverview({
                 <th className={cn(QA_TH_CLASS, "text-right")}>
                   {tx("qa.overview.activeTaskCount", "活跃任务")}
                 </th>
+                <th className={cn(QA_TH_CLASS, "text-right")}>
+                  {tx("qa.overview.projectActions", "操作")}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -242,6 +247,20 @@ export function QaOverview({
                     ) : (
                       <span className="text-muted-foreground">0</span>
                     )}
+                  </td>
+                  <td className={cn(QA_TD_CLASS, "text-right")}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 gap-1 px-2 text-[12px]"
+                      aria-label={`${tx("qa.overview.projectEdit", "编辑项目")} ${project.key}`}
+                      data-testid="qa-project-edit"
+                      onClick={() => setEditingProject(project)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden />
+                      {tx("qa.overview.projectEditShort", "编辑")}
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -347,52 +366,84 @@ export function QaOverview({
         </section>
       </div>
 
-      <QaCreateProjectDialog
+      <QaProjectDialog
         client={client}
         open={projectDialogOpen}
         onOpenChange={setProjectDialogOpen}
-        onCreated={onReloadProjects}
+        onSaved={onReloadProjects}
+      />
+
+      <QaProjectDialog
+        client={client}
+        open={editingProject !== null}
+        project={editingProject}
+        onOpenChange={(open) => {
+          if (!open) setEditingProject(null);
+        }}
+        onSaved={() => {
+          setEditingProject(null);
+          onReloadProjects();
+          overview.reload();
+        }}
       />
     </div>
   );
 }
 
-export function QaCreateProjectDialog({
+export function QaProjectDialog({
   client,
   open,
   onOpenChange,
-  onCreated,
+  project = null,
+  onSaved,
 }: {
   client: QaMutationTransport;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
+  /** Pass a project to edit it; omit (or `null`) to create one. */
+  project?: QaProject | null;
+  onSaved: () => void;
 }) {
   const tx = useQaCopy();
+  const editing = project !== null;
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  // Re-seed on every open: the same component instance serves create and edit.
+  useEffect(() => {
+    if (!open) return;
+    setKey(project?.key ?? "");
+    setName(project?.name ?? "");
+    setDescription(project?.description ?? "");
+    setBaseUrl(project?.base_url ?? "");
+    setRepoPath(project?.repo_path ?? "");
+    setError("");
+  }, [open, project]);
+
   const submit = async () => {
     if (!key.trim() || !name.trim() || busy) return;
     setBusy(true);
     setError("");
+    const fields = {
+      key: key.trim(),
+      name: name.trim(),
+      description: description.trim(),
+      base_url: baseUrl.trim(),
+      repo_path: repoPath.trim(),
+    };
     try {
-      await createQaProject(client, {
-        key: key.trim(),
-        name: name.trim(),
-        base_url: baseUrl.trim(),
-        repo_path: repoPath.trim(),
-      });
+      if (project) {
+        await updateQaProject(client, project.id, fields);
+      } else {
+        await createQaProject(client, fields);
+      }
       onOpenChange(false);
-      setKey("");
-      setName("");
-      setBaseUrl("");
-      setRepoPath("");
-      onCreated();
+      onSaved();
     } catch (reason) {
       setError(qaErrorMessage(reason));
     } finally {
@@ -402,11 +453,20 @@ export function QaCreateProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" data-testid="qa-project-dialog">
         <DialogHeader>
-          <DialogTitle>{tx("qa.overview.projectCreate", "新建项目")}</DialogTitle>
+          <DialogTitle>
+            {editing
+              ? tx("qa.overview.projectEdit", "编辑项目")
+              : tx("qa.overview.projectCreate", "新建项目")}
+          </DialogTitle>
           <DialogDescription>
-            {tx("qa.overview.projectCreateHint", "KEY 用于用例编号前缀，例如 WEB-API-001。")}
+            {editing
+              ? tx(
+                  "qa.overview.projectEditHint",
+                  "修改 KEY 只影响之后生成的用例编号，已有用例编号保持不变。",
+                )
+              : tx("qa.overview.projectCreateHint", "KEY 用于用例编号前缀，例如 WEB-API-001。")}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 text-left">
@@ -419,6 +479,7 @@ export function QaCreateProjectDialog({
               aria-label={tx("qa.overview.projectKey", "KEY")}
               onChange={(event) => setKey(event.target.value)}
               disabled={busy}
+              data-testid="qa-project-key"
             />
           </label>
           <label className="block">
@@ -430,6 +491,19 @@ export function QaCreateProjectDialog({
               aria-label={tx("qa.overview.projectName", "名称")}
               onChange={(event) => setName(event.target.value)}
               disabled={busy}
+              data-testid="qa-project-name"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-medium text-muted-foreground">
+              {tx("qa.overview.projectDescription", "描述")}
+            </span>
+            <Input
+              value={description}
+              aria-label={tx("qa.overview.projectDescription", "描述")}
+              onChange={(event) => setDescription(event.target.value)}
+              disabled={busy}
+              data-testid="qa-project-description"
             />
           </label>
           <label className="block">
@@ -441,6 +515,7 @@ export function QaCreateProjectDialog({
               aria-label={tx("qa.overview.baseUrl", "BASE URL")}
               onChange={(event) => setBaseUrl(event.target.value)}
               disabled={busy}
+              data-testid="qa-project-base-url"
             />
           </label>
           <label className="block">
@@ -452,6 +527,7 @@ export function QaCreateProjectDialog({
               aria-label={tx("qa.overview.repoPath", "仓库路径")}
               onChange={(event) => setRepoPath(event.target.value)}
               disabled={busy}
+              data-testid="qa-project-repo-path"
             />
           </label>
           {error ? <QaErrorBar message={error} /> : null}
@@ -460,7 +536,12 @@ export function QaCreateProjectDialog({
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
             {tx("qa.actions.cancel", "取消")}
           </Button>
-          <Button type="button" onClick={() => void submit()} disabled={busy || !key.trim() || !name.trim()}>
+          <Button
+            type="button"
+            onClick={() => void submit()}
+            disabled={busy || !key.trim() || !name.trim()}
+            data-testid="qa-project-submit"
+          >
             {tx("qa.actions.save", "保存")}
           </Button>
         </DialogFooter>

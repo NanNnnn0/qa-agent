@@ -1,0 +1,19 @@
+schema_version: 1
+id: TC-LOGIN-004
+module: LOGIN
+title: 锁定期间正确密码也不放行
+testpoints:
+  - TP-LOGIN-005
+priority: P2
+type: functional
+status: draft
+preconditions: 账号 qa01 已被锁定
+steps:
+  - action: 锁定期间用正确密码登录
+    expected: 提示“账号锁定 15 分钟”，HTTP 状态码 423
+automation:
+  status: manual
+owner: qa.li
+tags:
+  - login
+note: 待审草稿：由 Agent 生成，等待人工审核后进入正式库

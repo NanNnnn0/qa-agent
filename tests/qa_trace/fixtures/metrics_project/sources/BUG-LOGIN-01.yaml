@@ -1,0 +1,13 @@
+schema_version: 1
+id: BUG-LOGIN-01
+type: bug
+module: LOGIN
+title: 锁定后仍可登录的缺陷
+evidence:
+  - type: issue
+    locator: BUG-7781
+    description: 缺陷单 BUG-7781 复现步骤与修复期望
+    verified: external_unverified
+confidence: confirmed
+status: active
+owner: qa.zhang

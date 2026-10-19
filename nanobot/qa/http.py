@@ -4,6 +4,11 @@ Reads are ordinary authenticated GETs. Writes follow the WebUI CSRF design:
 they are only accepted through the authenticated WebSocket mutation channel,
 which marks the synthetic request and carries the JSON payload.
 
+``/api/qa/trace/*`` is served by :mod:`nanobot.qa.trace_api`, which delegates to
+the ``qa_trace`` domain library.  It lives under the same prefix on purpose: the
+traceability chain is a tab of the existing workbench, not a second workbench,
+and it reuses the same token check and the same mutation channel.
+
 This module must not import ``nanobot.webui.ws_http`` (that module imports the
 QA routes), so the mutation attribute names are repeated here exactly as the
 WebUI transport defines them.
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, cast
 
 from loguru import logger
@@ -20,6 +26,7 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from nanobot.qa import service
+from nanobot.qa.case_files import CaseFiles
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
     QaConflictError,
@@ -63,9 +70,45 @@ QA_MUTATION_PATHS: dict[str, str] = {
     "qa.task.reject": "/api/qa/tasks/reject",
     "qa.run.start": "/api/qa/runs/start",
     "qa.run.import": "/api/qa/runs/import",
+    "qa.schedule.create": "/api/qa/schedules/create",
+    "qa.schedule.update": "/api/qa/schedules/update",
+    "qa.schedule.delete": "/api/qa/schedules/delete",
+    "qa.schedule.run_now": "/api/qa/schedules/run-now",
+    # P4: trace-chain review. ``stale_write`` only records a baseline; the two
+    # review actions are the only way a draft enters the formal library.
+    "qa.trace.stale_write": "/api/qa/trace/stale/write",
+    "qa.trace.review_approve": "/api/qa/trace/review/approve",
+    "qa.trace.review_reject": "/api/qa/trace/review/reject",
 }
 
 QA_WRITE_PATHS = frozenset(QA_MUTATION_PATHS.values())
+
+#: Fields a case write may carry.  The first block is the legacy workbench
+#: contract; the second is the trace link a case needs before it can leave
+#: ``draft/`` for ``cases/``.
+_CASE_WRITE_FIELDS = frozenset({
+    "title",
+    "kind",
+    "code",
+    "priority",
+    "status",
+    "preconditions",
+    "steps",
+    "api",
+    "expected",
+    "tags",
+    "source",
+    "author",
+    "batch",
+    "testpoints",
+    "sources",
+    "direct_reason",
+    "risk",
+    "postconditions",
+    "owner",
+    "note",
+})
+
 
 
 def _error(status: int, message: str) -> Response:
@@ -89,9 +132,33 @@ class QaApi:
         store: QaStore,
         *,
         check_api_token: Callable[[WsRequest], bool] | None = None,
+        trace_root: str | Path | None = None,
     ) -> None:
         self.store = store
         self._check_api_token = check_api_token
+        # None keeps the environment-driven default (NANOBOT_QA_TRACE_ROOT);
+        # tests and demos point the adapter at a temporary project root.
+        self.trace_root = trace_root
+        self._trace_api: Any = None
+        self._case_files: CaseFiles | None = None
+
+    # -- YAML case library -------------------------------------------------
+
+    def _cases(self) -> CaseFiles:
+        """Return the YAML-backed case library (SQLite only indexes it)."""
+        if self._case_files is None:
+            self._case_files = CaseFiles(self.store, self.trace_root)
+        return self._case_files
+
+    # -- trace adapter -----------------------------------------------------
+
+    def _trace(self) -> Any:
+        """Return the lazily created trace adapter (imported on first use)."""
+        if self._trace_api is None:
+            from nanobot.qa.trace_api import TraceApi
+
+            self._trace_api = TraceApi(self.trace_root)
+        return self._trace_api
 
     # -- authorization -----------------------------------------------------
 
@@ -132,6 +199,8 @@ class QaApi:
     async def _dispatch_read(self, request: WsRequest, path: str) -> Response | None:
         query = _parse_query(request.path)
         store = self.store
+        if path == f"{QA_PREFIX}/trace" or path.startswith(f"{QA_PREFIX}/trace/"):
+            return self._dispatch_trace_read(path, query)
         if path == f"{QA_PREFIX}/health":
             return _ok({"store": str(store.path)})
         if path == f"{QA_PREFIX}/overview":
@@ -141,10 +210,10 @@ class QaApi:
         if path.startswith(f"{QA_PREFIX}/projects/"):
             return _ok({"project": store.get_project(path.rsplit("/", 1)[-1])})
         if path == f"{QA_PREFIX}/cases/export":
-            payload = store.export_cases(_query_first(query, "project_id") or None)
+            payload = self._cases().export_cases(_query_first(query, "project_id") or None)
             return _ok(payload)
         if path == f"{QA_PREFIX}/cases":
-            return _ok(store.list_cases(
+            return _ok(self._cases().list_cases(
                 project_id=_query_first(query, "project_id") or None,
                 kind=_query_first(query, "kind") or None,
                 status=_query_first(query, "status") or None,
@@ -153,7 +222,7 @@ class QaApi:
                 offset=_int_query(query, "offset", 0),
             ))
         if path.startswith(f"{QA_PREFIX}/cases/"):
-            return _ok({"case": store.get_case(path.rsplit("/", 1)[-1])})
+            return _ok({"case": self._cases().get_case(path.rsplit("/", 1)[-1])})
         if path == f"{QA_PREFIX}/scripts":
             return _ok(store.list_scripts(
                 project_id=_query_first(query, "project_id") or None,
@@ -171,6 +240,10 @@ class QaApi:
             ))
         if path.startswith(f"{QA_PREFIX}/runs/"):
             return _ok({"run": store.get_run(path.rsplit("/", 1)[-1])})
+        if path == f"{QA_PREFIX}/schedules":
+            return _ok({"items": store.list_schedules(
+                project_id=_query_first(query, "project_id") or None,
+            )})
         if path == f"{QA_PREFIX}/tasks":
             return _ok(store.list_tasks(
                 project_id=_query_first(query, "project_id") or None,
@@ -186,6 +259,42 @@ class QaApi:
             return _ok({"task": store.get_task(path.rsplit("/", 1)[-1])})
         return None
 
+    # -- trace reads -------------------------------------------------------
+
+    def _dispatch_trace_read(
+        self, path: str, query: dict[str, list[str]]
+    ) -> Response:
+        """Serve ``/api/qa/trace/*`` from the qa_trace domain library."""
+        trace = self._trace()
+        route = path[len(f"{QA_PREFIX}/trace"):].strip("/")
+        project = _query_first(query, "project") or None
+        if route == "projects":
+            return _ok(trace.list_projects())
+        if route == "summary":
+            return _ok(trace.summary(project))
+        if route == "tree":
+            return _ok(trace.tree(project))
+        if route == "impact":
+            return _ok(trace.impact(
+                project,
+                source=_query_first(query, "source") or None,
+                testpoint=_query_first(query, "testpoint") or None,
+                case=_query_first(query, "case") or None,
+            ))
+        if route == "stale":
+            return _ok(trace.stale(project))
+        if route == "drafts":
+            return _ok(trace.drafts(project, batch=_query_first(query, "batch") or None))
+        if route == "failure":
+            return _ok(trace.failure(
+                project,
+                run=_query_first(query, "run") or None,
+                case=_query_first(query, "case") or None,
+            ))
+        if route == "runs":
+            return _ok(trace.runs(project))
+        raise QaNotFoundError(f"QA trace route not found: {path}")
+
     # -- writes ------------------------------------------------------------
 
     async def _dispatch_write(self, request: WsRequest, path: str) -> Response:
@@ -195,6 +304,15 @@ class QaApi:
         if payload is None:
             return _error(400, "missing mutation payload")
         store = self.store
+        if path.startswith(f"{QA_PREFIX}/trace/"):
+            trace = self._trace()
+            if path == "/api/qa/trace/stale/write":
+                return _ok(await asyncio.to_thread(trace.stale_write, payload))
+            if path == "/api/qa/trace/review/approve":
+                return _ok(await asyncio.to_thread(trace.review_approve, payload))
+            if path == "/api/qa/trace/review/reject":
+                return _ok(await asyncio.to_thread(trace.review_reject, payload))
+            return _error(404, "QA trace mutation route not found")
         if path == "/api/qa/projects/create":
             project = store.create_project(
                 key=payload.get("key"),
@@ -215,12 +333,9 @@ class QaApi:
             store.delete_project(_require_id(payload))
             return _ok({"deleted": True})
         if path == "/api/qa/cases/create":
-            case = store.create_case(
+            case = self._cases().create_case(
                 (_require_field(payload, "project_id")),
-                **_fields(payload, {
-                    "title", "kind", "code", "priority", "status", "preconditions",
-                    "steps", "api", "expected", "tags", "source", "author",
-                }),
+                **_fields(payload, _CASE_WRITE_FIELDS),
             )
             return _ok({"case": case})
         if path == "/api/qa/cases/bulk-create":
@@ -237,28 +352,30 @@ class QaApi:
                     errors.append({"index": index, "error": "case must be an object"})
                     continue
                 try:
-                    created.append(store.create_case(
+                    created.append(self._cases().create_case(
                         project_id,
-                        **_fields(item, {
-                            "title", "kind", "code", "priority", "status", "preconditions",
-                            "steps", "api", "expected", "tags", "source", "author",
-                        }),
+                        **_fields(item, _CASE_WRITE_FIELDS),
                     ))
                 except QaError as exc:
                     errors.append({"index": index, "error": str(exc)})
             return _ok({"cases": created, "errors": errors, "created": len(created)})
         if path == "/api/qa/cases/update":
-            case = store.update_case(_require_id(payload), **_fields(payload, {
-                "title", "kind", "code", "priority", "status", "preconditions", "steps",
-                "api", "expected", "tags", "source", "author",
-            }))
+            case = self._cases().update_case(
+                _require_id(payload), **_fields(payload, _CASE_WRITE_FIELDS)
+            )
             return _ok({"case": case})
         if path == "/api/qa/cases/delete":
-            store.delete_case(_require_id(payload))
+            self._cases().delete_case(
+                _require_id(payload),
+                reason=str(payload.get("reason") or "") or None,
+                reviewer=str(payload.get("reviewer") or "") or None,
+            )
             return _ok({"deleted": True})
         if path == "/api/qa/cases/import":
             project_id = _require_field(payload, "project_id")
-            result = store.import_cases(project_id, payload.get("payload", payload.get("cases")))
+            result = self._cases().import_cases(
+                project_id, payload.get("payload", payload.get("cases"))
+            )
             return _ok(result)
         if path == "/api/qa/scripts/create":
             script = store.create_script(
@@ -343,6 +460,34 @@ class QaApi:
                 trigger=str(payload.get("trigger") or "ci"),
             )
             return _ok({"run": run})
+        if path == "/api/qa/schedules/create":
+            schedule = store.create_schedule(
+                _require_field(payload, "project_id"),
+                name=_require_field(payload, "name"),
+                cron=_require_field(payload, "cron"),
+                timezone=str(payload.get("timezone") or ""),
+                enabled=payload.get("enabled", True),
+                target=payload.get("target"),
+            )
+            return _ok({"schedule": schedule})
+        if path == "/api/qa/schedules/update":
+            schedule_id = _require_id(payload)
+            updates = _fields(
+                payload, {"name", "cron", "timezone", "enabled", "target"},
+            )
+            return _ok({"schedule": store.update_schedule(schedule_id, **updates)})
+        if path == "/api/qa/schedules/delete":
+            store.delete_schedule(_require_id(payload))
+            return _ok({"deleted": True})
+        if path == "/api/qa/schedules/run-now":
+            from nanobot.qa.scheduler import run_schedule
+
+            schedule = store.get_schedule(_require_id(payload))
+            run = await asyncio.to_thread(run_schedule, store, schedule)
+            store.record_schedule_run(
+                schedule["id"], run_id=run["id"], status=run["status"],
+            )
+            return _ok({"run": run, "schedule": store.get_schedule(schedule["id"])})
         return _error(404, "QA mutation route not found")
 
 

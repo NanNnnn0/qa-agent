@@ -18,6 +18,13 @@ from websockets.asyncio.server import ServerConnection
 from nanobot.bus.events import INBOUND_META_USER_SHELL
 from nanobot.channels.websocket.attachment_store import AttachmentUploadError
 from nanobot.command.builtin import USER_SHELL_COMMAND, builtin_command_starts_agent_turn
+from nanobot.qa import shared_store
+from nanobot.qa.chat_context import (
+    QA_PROJECT_METADATA_KEY,
+    binding_payload,
+    normalize_binding,
+)
+from nanobot.qa.validation import QaError
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_INPUT_META,
     WEBUI_QUOTE_METADATA,
@@ -468,6 +475,48 @@ class WebUICommandRouter:
                 workspace_scope=scope.payload(),
             )
             return
+        if command_type == "set_qa_project":
+            chat_id = envelope.get("chat_id")
+            if not is_valid_webui_chat_id(chat_id):
+                await self._transport.webui_send_event(
+                    connection, "error", detail="invalid chat_id",
+                )
+                return
+            raw_project_id = envelope.get("project_id")
+            if raw_project_id is not None and (
+                not isinstance(raw_project_id, str) or not raw_project_id.strip()
+            ):
+                await self._transport.webui_send_event(
+                    connection, "error", detail="invalid project_id",
+                )
+                return
+            sessions = self.gateway.session_manager
+            if sessions is None:
+                await self._transport.webui_send_event(
+                    connection, "error", detail="session storage unavailable",
+                )
+                return
+            binding = None
+            if raw_project_id:
+                try:
+                    project = shared_store().get_project(raw_project_id.strip())
+                except QaError:
+                    await self._transport.webui_send_event(
+                        connection, "error", detail="qa_project_rejected",
+                        chat_id=chat_id,
+                    )
+                    return
+                binding = binding_payload(project)
+            await sessions.state.open_with_metadata(
+                webui_session_key(chat_id),
+                {QA_PROJECT_METADATA_KEY: binding},
+            )
+            await self._transport.send_session_updated(chat_id, scope="metadata")
+            await self._transport.webui_send_event(
+                connection, "session_updated", chat_id=chat_id,
+                scope="metadata", qa_project=binding,
+            )
+            return
         if command_type == "transcribe_audio":
             event, payload = await webui_transcription_event(
                 envelope,
@@ -692,6 +741,18 @@ class WebUICommandRouter:
             if session_mentions:
                 metadata["session_mentions"] = session_mentions
         metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
+        sessions = self.gateway.session_manager
+        if sessions is not None:
+            session_meta = await sessions.state.read_metadata(
+                webui_session_key(chat_id)
+            )
+            binding = normalize_binding(
+                ((session_meta or {}).get("metadata") or {}).get(
+                    QA_PROJECT_METADATA_KEY
+                )
+            )
+            if binding is not None:
+                metadata[QA_PROJECT_METADATA_KEY] = binding
         # Revalidate after all asynchronous scope/hydration work. Commit before
         # persisting paths, with no intervening await, so expiry cannot remove
         # files referenced by the canonical transcript.

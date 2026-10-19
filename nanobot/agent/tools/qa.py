@@ -26,6 +26,8 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.qa import service, shared_store
+from nanobot.qa.case_files import CaseFiles
+from nanobot.qa.chat_context import bound_project_id
 from nanobot.qa.roles import ROLE_LABELS, compose_prompt
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
@@ -109,6 +111,15 @@ class _QaTool(Tool):
 
     def _store(self) -> QaStore:
         return shared_store()
+
+    def _project_id(self, explicit: str | None) -> str | None:
+        """Default to the chat's bound QA project when the caller omitted it."""
+        if explicit:
+            return explicit
+        ctx = current_request_context()
+        if ctx is None:
+            return None
+        return bound_project_id(ctx.metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +274,11 @@ class QaCaseTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
+        library = CaseFiles(store)
         try:
             if action == "list":
-                result = store.list_cases(
+                result = library.list_cases(
                     project_id=project_id,
                     kind=kind,
                     query=query,
@@ -278,11 +291,11 @@ class QaCaseTool(_QaTool):
             if action == "get":
                 if not case_id:
                     return ToolResult.error("Error: get requires case_id")
-                return _dumps({"case": store.get_case(case_id)})
+                return _dumps({"case": library.get_case(case_id)})
             if action == "create":
                 if not project_id:
                     return ToolResult.error("Error: create requires project_id")
-                case = store.create_case(
+                case = library.create_case(
                     project_id,
                     title=title or "",
                     kind=kind or "api",
@@ -313,7 +326,7 @@ class QaCaseTool(_QaTool):
                         errors.append({"index": index, "error": "project_id is required"})
                         continue
                     try:
-                        created.append(store.create_case(
+                        created.append(library.create_case(
                             target_project,
                             title=item.get("title", ""),
                             kind=item.get("kind", "api"),
@@ -337,7 +350,7 @@ class QaCaseTool(_QaTool):
             if action == "update":
                 if not case_id:
                     return ToolResult.error("Error: update requires case_id")
-                case = store.update_case(
+                case = library.update_case(
                     case_id,
                     title=title,
                     kind=kind,
@@ -354,7 +367,7 @@ class QaCaseTool(_QaTool):
             if action == "delete":
                 if not case_id:
                     return ToolResult.error("Error: delete requires case_id")
-                store.delete_case(case_id)
+                library.delete_case(case_id)
                 return _dumps({"deleted": case_id})
             return ToolResult.error("Error: unknown qa_case action")
         except QaError as exc:
@@ -417,6 +430,7 @@ class QaScriptTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 return _dumps(store.list_scripts(
@@ -520,6 +534,7 @@ class QaRunTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 return _dumps(store.list_runs(project_id=project_id, limit=limit or 50))
@@ -742,6 +757,7 @@ class QaTaskTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 payload = store.list_tasks(

@@ -66,6 +66,7 @@ import {
 import type { CanonicalRunSnapshot, StreamError } from "@/lib/nanobot-client";
 import type {
   ChatSummary,
+  QaProjectBinding,
   FilePreviewPayload,
   FileReferenceMetadata,
   RoundUsage,
@@ -553,6 +554,10 @@ interface ThreadShellProps {
   workspaceScopeDisabled?: boolean;
   workspaceError?: string | null;
   onWorkspaceScopeChange?: (scope: WorkspaceScopePayload) => void;
+  qaProject?: QaProjectBinding | null;
+  qaProjects?: QaProjectBinding[] | null;
+  onLoadQaProjects?: () => Promise<QaProjectBinding[]>;
+  onQaProjectChange?: (projectId: string | null) => void;
   settingsSnapshot?: SettingsPayload | null;
   settingsLoading?: boolean;
   onOpenModelSettings?: () => void;
@@ -771,6 +776,10 @@ export function ThreadShell({
   workspaceScopeDisabled = false,
   workspaceError = null,
   onWorkspaceScopeChange,
+  qaProject = null,
+  qaProjects = null,
+  onLoadQaProjects,
+  onQaProjectChange,
   settingsSnapshot = null,
   settingsLoading = false,
   onOpenModelSettings,
@@ -1971,6 +1980,10 @@ export function ThreadShell({
           workspaceScopeDisabled={workspaceScopeDisabled}
           workspaceError={workspaceError}
           onWorkspaceScopeChange={onWorkspaceScopeChange}
+          qaProject={qaProject}
+          qaProjects={qaProjects}
+          onLoadQaProjects={onLoadQaProjects}
+          onQaProjectChange={onQaProjectChange}
           pendingQueueKey={temporary ? null : chatId}
           transcriptionProvider={settingsSnapshot?.transcription?.provider}
           ingressLimits={ingressLimits}
@@ -2029,6 +2042,10 @@ export function ThreadShell({
           workspaceScopeDisabled={workspaceScopeDisabled}
           workspaceError={workspaceError}
           onWorkspaceScopeChange={onWorkspaceScopeChange}
+          qaProject={qaProject}
+          qaProjects={qaProjects}
+          onLoadQaProjects={onLoadQaProjects}
+          onQaProjectChange={onQaProjectChange}
           transcriptionProvider={settingsSnapshot?.transcription?.provider}
           ingressLimits={ingressLimits}
           quotedContext={quotedContext}

@@ -148,13 +148,17 @@ def _select_cases(
             case = store.get_case(case_id)
             if case["project_id"] != project_id:
                 raise QaValidationError(f"case '{case_id}' does not belong to this project")
+            if case.get("status") == "deprecated":
+                raise QaValidationError(f"case '{case_id}' is archived and cannot be run")
             cases.append(case)
         if len(cases) > MAX_CASES_PER_RUN:
             raise QaValidationError(
                 f"at most {MAX_CASES_PER_RUN} cases can run at once; narrow the selection"
             )
         return cases
-    total = store.list_cases(project_id=project_id, kind=kind, limit=1)["total"]
+    total = store.list_cases(
+        project_id=project_id, kind=kind, exclude_deprecated=True, limit=1,
+    )["total"]
     if total > MAX_CASES_PER_RUN:
         raise QaValidationError(
             f"{total} cases selected, at most {MAX_CASES_PER_RUN} can run at once; "
@@ -164,7 +168,11 @@ def _select_cases(
     offset = 0
     while offset < total:
         page = store.list_cases(
-            project_id=project_id, kind=kind, limit=_PAGE_SIZE, offset=offset,
+            project_id=project_id,
+            kind=kind,
+            exclude_deprecated=True,
+            limit=_PAGE_SIZE,
+            offset=offset,
         )
         if not page["items"]:
             break
@@ -255,7 +263,9 @@ def _case_problems(
     problems: list[str] = []
     if case.get("kind") != "api":
         problems.append(f"kind is '{case.get('kind')}', only api cases execute here")
-    if case.get("status") != "ready":
+    if case.get("status") == "deprecated":
+        problems.append("case is archived (deprecated) and cannot run")
+    elif case.get("status") != "ready":
         problems.append(f"status is '{case.get('status')}', only ready cases execute")
     api = case.get("api") or {}
     request = api.get("request") or {}

@@ -1,0 +1,13 @@
+schema_version: 1
+id: TC-LOGIN-005
+title: 优先级取值不在 P0-P3
+testpoints:
+  - TP-LOGIN-005
+priority: P9
+type: functional
+status: draft
+steps:
+  - action: 打开登录页
+    expected: 登录页标题显示“登录”
+automation:
+  status: manual

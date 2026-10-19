@@ -1,0 +1,15 @@
+schema_version: 1
+id: TP-SHOP-005
+module: SHOP
+title: 购物车结算前端流程
+sources:
+- EX-SHOP-01
+method: scenario
+risk: medium
+status: reviewed
+owner: qa-agent
+tags:
+- shop
+- cart
+- ui
+note: 覆盖 TC-SHOP-007（SHOP-UI-001）：购物车金额展示 → 去结算 → 下单成功

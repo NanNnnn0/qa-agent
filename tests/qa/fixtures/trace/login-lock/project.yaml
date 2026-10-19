@@ -1,0 +1,8 @@
+schema_version: 1
+project_id: login-lock
+name: 登录锁定演示库（qa-trace P4）
+modules:
+  - LOGIN
+thresholds:
+  p0_ratio_max: 0.2
+  manual_p0_max_days: 90

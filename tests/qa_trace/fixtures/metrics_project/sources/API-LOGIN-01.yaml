@@ -1,0 +1,13 @@
+schema_version: 1
+id: API-LOGIN-01
+type: api
+module: LOGIN
+title: 登录接口错误码契约
+evidence:
+  - type: openapi
+    locator: api/openapi.yaml#/paths/~1login/post/responses/401
+    description: OpenAPI 3.4.1 登录接口 401 响应
+    verified: verified_local
+confidence: confirmed
+status: active
+owner: qa.li

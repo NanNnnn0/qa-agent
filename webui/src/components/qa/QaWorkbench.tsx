@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronLeft, FlaskConical, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { usePageVisibility } from "@/hooks/usePageVisibility";
 import { loadQaProjects, type QaMutationTransport } from "@/lib/qa-api";
 import { cn } from "@/lib/utils";
@@ -9,14 +10,31 @@ import { cn } from "@/lib/utils";
 import { QaCaseLibrary } from "./QaCaseLibrary";
 import { QaOverview } from "./QaOverview";
 import { QaRuns } from "./QaRuns";
+import { QaSchedules } from "./QaSchedules";
 import { QaScripts } from "./QaScripts";
 import { QaTaskBoard } from "./QaTaskBoard";
+import { QaTrace } from "./QaTrace";
 import { QaErrorBar, useQaCopy } from "./qa-ui";
 import { useQaQuery } from "./useQaQuery";
 
-export type QaTab = "overview" | "tasks" | "cases" | "scripts" | "runs";
+export type QaTab =
+  | "overview"
+  | "tasks"
+  | "cases"
+  | "scripts"
+  | "schedules"
+  | "runs"
+  | "trace";
 
-const QA_TABS: QaTab[] = ["overview", "tasks", "cases", "scripts", "runs"];
+const QA_TABS: QaTab[] = [
+  "overview",
+  "tasks",
+  "cases",
+  "scripts",
+  "schedules",
+  "runs",
+  "trace",
+];
 
 /** Visible list polling cadence; tests pass `pollIntervalMs={0}`. */
 export const QA_POLL_INTERVAL_MS = 3_000;
@@ -26,6 +44,8 @@ export interface QaWorkbenchProps {
   client: QaMutationTransport;
   onBackToChat: () => void;
   initialTab?: QaTab;
+  /** QA project bound to the chat that opened the workbench. */
+  initialProjectId?: string;
   pollIntervalMs?: number;
 }
 
@@ -34,10 +54,15 @@ export function QaWorkbench({
   client,
   onBackToChat,
   initialTab = "overview",
+  initialProjectId = "all",
   pollIntervalMs = QA_POLL_INTERVAL_MS,
 }: QaWorkbenchProps) {
   const tx = useQaCopy();
   const [tab, setTab] = useState<QaTab>(initialTab);
+  const [scopeProjectId, setScopeProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setScopeProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const visible = usePageVisibility();
 
@@ -58,7 +83,9 @@ export function QaWorkbench({
     tasks: tx("qa.tabs.tasks", "任务板"),
     cases: tx("qa.tabs.cases", "用例库"),
     scripts: tx("qa.tabs.scripts", "自动化"),
+    schedules: tx("qa.tabs.schedules", "定时任务"),
     runs: tx("qa.tabs.runs", "运行记录"),
+    trace: tx("qa.tabs.trace", "追溯"),
   };
 
   return (
@@ -85,6 +112,23 @@ export function QaWorkbench({
                 {tx("qa.subtitle", "用例、自动化脚本、执行与 Agent 任务的统一入口。")}
               </p>
             </div>
+            <Select value={scopeProjectId} onValueChange={setScopeProjectId}>
+              <SelectTrigger
+                aria-label={tx("qa.scope.project", "当前项目")}
+                className="h-8 w-[10rem] shrink-0"
+                data-testid="qa-scope-project"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{tx("qa.filters.allProjects", "全部项目")}</SelectItem>
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id}>
+                    {project.key || project.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Button
               type="button"
               variant="outline"
@@ -176,6 +220,7 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 onChanged={refresh}
               />
@@ -185,7 +230,19 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
+                onChanged={refresh}
+              />
+            ) : null}
+            {tab === "schedules" ? (
+              <QaSchedules
+                token={token}
+                client={client}
+                projects={projects}
+                initialProjectId={scopeProjectId}
+                refreshSignal={refreshSignal}
+                pollIntervalMs={pollIntervalMs}
                 onChanged={refresh}
               />
             ) : null}
@@ -194,7 +251,15 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 pollIntervalMs={pollIntervalMs}
+                refreshSignal={refreshSignal}
+              />
+            ) : null}
+            {tab === "trace" ? (
+              <QaTrace
+                token={token}
+                client={client}
                 refreshSignal={refreshSignal}
               />
             ) : null}

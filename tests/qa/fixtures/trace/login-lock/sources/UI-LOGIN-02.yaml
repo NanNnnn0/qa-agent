@@ -1,0 +1,22 @@
+schema_version: 1
+id: UI-LOGIN-02
+type: ui
+module: LOGIN
+title: 登录失败 5 次触发账号锁定
+evidence:
+  - type: ui_capture
+    locator: artifacts/ui/login-lock-5x.png
+    description: 第 5 次错误提交后的界面截图（演示库为占位图，真实项目放真实截图）
+    verified: verified_local
+  - type: ui_capture
+    locator: artifacts/ui/login-lock.har
+    description: 锁定流程的 HTTP 抓包（记录第 5 次请求的状态码与响应体）
+    verified: verified_local
+url: /login
+app_version: 3.4.1
+observed_at: 2026-10-18
+confidence: confirmed
+stale: false
+status: active
+owner: qa.zhang
+note: 实测提示文案为“用户名或密码错误”，第 5 次仍未返回 423（见失败运行记录）
