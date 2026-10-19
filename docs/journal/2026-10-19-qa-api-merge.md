@@ -35,3 +35,13 @@ Both sides' tests passed on the union, including `test_schedules`, `test_case_fi
 ### Why this is not a version bump
 
 Both branches call their additive change version 3. Neither `_migrate` needs DDL for the API tables, and the schedule branch's v3 branch only adds columns, so a database already at 3 gains whichever structures it lacks on open. ADR 0007 records this; the merge needs a gate run, not a renumber.
+
+## Deployment (2026-10-19 07:40 UTC)
+
+- `/opt/qa-agent` checked out `main` at `b474652`; the previous state was branch `deploy/20261019-093f4020` at `57ef83a`, which stays as the rollback ref.
+- `.venv/bin/pip install -e . --no-deps` refreshed the editable entry points for `main`.
+- `cd webui && npm run build` rebuilt `nanobot/web/dist` (24.85s) because the merge brought the schedule branch's WebUI changes.
+- Gate on the deployment checkout: `pytest tests/qa -q -p no:cacheprovider` -> 230 passed; `ruff check nanobot/qa` -> clean.
+- `systemctl restart qa-agent`: active, 0 restarts, 8765 and 18790 listening, `/` -> 200, `/health` -> 200, `/api/qa/*` answers 401 without a token as designed, and the first QA request created `api_operations`, `api_case_metadata`, `api_case_revisions` and `api_workflows` in the live database.
+- Rollback: `cd /opt/qa-agent && git checkout deploy/20261019-093f4020 && systemctl restart qa-agent`.
+- Not pushed: `main` is 22 commits ahead of `origin/main`.
