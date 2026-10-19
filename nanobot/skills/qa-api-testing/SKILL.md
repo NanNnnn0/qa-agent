@@ -74,7 +74,7 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 
 失败分类：`assertion_failed`（断言失败，先判断是产品缺陷还是断言写错）、`config_error`（用例或配置问题）、`env_blocked`（连不上，报阻塞而不是缺陷）、`auth_failed`（登录或凭证问题）。
 
-临时手工验证仍可用 `qa_run action=start`，但它不做预检、不固定快照、不分批，也不脱敏，不要用它出正式结论。
+`qa_run action=start` 与 `qa_api_run` 走同一条执行管道（预检、快照、分批、脱敏），区别只是 `qa_api_run` 额外支持 `plan` 和 `auth`；两者都只执行 ready 用例，草稿状态会直接报错并列出用例编号。
 
 ## 第 5 步：结论
 

@@ -47,3 +47,4 @@ Each alternative with the reason it lost. This is the part that saves the next s
 | [0005](0005-ordered-run-plans.md) | Order API runs as versioned setup, cases and cleanup phases | accepted |
 | [0006](0006-async-runs.md) | Start runs in the background and serialize them per project | accepted |
 | [0007](0007-shared-schema-v3.md) | Reconcile two parallel schema v3 changes and two scheduler modules | accepted |
+| [0008](0008-single-run-pipeline.md) | One execution pipeline for every run entry point | accepted |

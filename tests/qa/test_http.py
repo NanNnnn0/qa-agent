@@ -109,6 +109,7 @@ async def test_task_routes_and_run_start(store: QaStore, project: dict, demo_api
     case = store.create_case(
         project["id"],
         title="health",
+        status="ready",
         api={
             "request": {"method": "GET", "path": "/api/products"},
             "assertions": [{"type": "status", "expect": 200}],

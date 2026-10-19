@@ -168,6 +168,7 @@ async def test_run_tool_executes_cases(demo_api: str) -> None:
         project_id=project_id,
         title="products",
         kind="api",
+        status="ready",
         api={
             "request": {"method": "GET", "path": "/api/products"},
             "assertions": [{"type": "status", "expect": 200}],

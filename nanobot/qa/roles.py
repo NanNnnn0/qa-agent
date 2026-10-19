@@ -69,7 +69,7 @@ _TAIL_CONTRACT = """\
 - 执行：qa_api_run action=preflight|start|get（start 走固定模板，运行记录固定用例修订）；有序执行用 plan 参数：setup → cases → cleanup，每步写 case_id 与 revision；start 默认异步返回 running，用 get 轮询或传 wait=true，同项目运行串行
 - 用例：qa_case action=list|create|bulk_create|update|delete（bulk_create 单次最多 50 条）
 - 脚本：qa_script action=create|update|list|get
-- 执行：qa_run action=start（case_ids 或 script_id）|list|get
+- 执行：qa_run action=start（case_ids 或 script_id，只执行 ready 用例，与 qa_api_run 同一条管道）|list|get
 - 任务：qa_task action=update（收尾）/artifact（登记产物）/event（进度）
 
 接口用例的 api 字段必须是这个结构（runner 直接执行，不做自然语言解析）：
