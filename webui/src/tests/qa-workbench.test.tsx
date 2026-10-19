@@ -649,4 +649,25 @@ describe("QA workbench", () => {
     expect(screen.queryByText("下单脚本")).not.toBeInTheDocument();
     expect(screen.getByTestId("qa-script-project-proj-2")).toBeInTheDocument();
   });
+
+  it("defaults the workbench scope to the chat's bound QA project", async () => {
+    const user = userEvent.setup();
+    renderWorkbench({ initialProjectId: "proj-1" });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qa-count-cases")).toHaveTextContent("12");
+    });
+    expect(screen.getByTestId("qa-scope-project")).toHaveTextContent("WEB");
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    await user.click(screen.getByTestId("qa-tab-scripts"));
+    await waitFor(() => {
+      const urls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(
+        urls.some(
+          (url) => url.includes("/api/qa/scripts") && url.includes("project_id=proj-1"),
+        ),
+      ).toBe(true);
+    });
+  });
 });

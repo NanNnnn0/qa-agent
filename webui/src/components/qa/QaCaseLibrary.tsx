@@ -133,6 +133,7 @@ export interface QaCaseLibraryProps {
   projects: QaProject[];
   refreshSignal: number;
   onChanged: () => void;
+  initialProjectId?: string;
 }
 
 export function QaCaseLibrary({
@@ -141,9 +142,13 @@ export function QaCaseLibrary({
   projects,
   refreshSignal,
   onChanged,
+  initialProjectId = "all",
 }: QaCaseLibraryProps) {
   const tx = useQaCopy();
-  const [projectId, setProjectId] = useState<string>("all");
+  const [projectId, setProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [kind, setKind] = useState<string>("all");
   const [status, setStatus] = useState<string>("all");
   const [search, setSearch] = useState("");

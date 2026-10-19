@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronLeft, FlaskConical, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { usePageVisibility } from "@/hooks/usePageVisibility";
 import { loadQaProjects, type QaMutationTransport } from "@/lib/qa-api";
 import { cn } from "@/lib/utils";
@@ -43,6 +44,8 @@ export interface QaWorkbenchProps {
   client: QaMutationTransport;
   onBackToChat: () => void;
   initialTab?: QaTab;
+  /** QA project bound to the chat that opened the workbench. */
+  initialProjectId?: string;
   pollIntervalMs?: number;
 }
 
@@ -51,10 +54,15 @@ export function QaWorkbench({
   client,
   onBackToChat,
   initialTab = "overview",
+  initialProjectId = "all",
   pollIntervalMs = QA_POLL_INTERVAL_MS,
 }: QaWorkbenchProps) {
   const tx = useQaCopy();
   const [tab, setTab] = useState<QaTab>(initialTab);
+  const [scopeProjectId, setScopeProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setScopeProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const visible = usePageVisibility();
 
@@ -104,6 +112,23 @@ export function QaWorkbench({
                 {tx("qa.subtitle", "用例、自动化脚本、执行与 Agent 任务的统一入口。")}
               </p>
             </div>
+            <Select value={scopeProjectId} onValueChange={setScopeProjectId}>
+              <SelectTrigger
+                aria-label={tx("qa.scope.project", "当前项目")}
+                className="h-8 w-[10rem] shrink-0"
+                data-testid="qa-scope-project"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{tx("qa.filters.allProjects", "全部项目")}</SelectItem>
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id}>
+                    {project.key || project.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Button
               type="button"
               variant="outline"
@@ -195,6 +220,7 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 onChanged={refresh}
               />
@@ -204,6 +230,7 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 onChanged={refresh}
               />
@@ -213,6 +240,7 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 pollIntervalMs={pollIntervalMs}
                 onChanged={refresh}
@@ -223,6 +251,7 @@ export function QaWorkbench({
                 token={token}
                 client={client}
                 projects={projects}
+                initialProjectId={scopeProjectId}
                 pollIntervalMs={pollIntervalMs}
                 refreshSignal={refreshSignal}
               />

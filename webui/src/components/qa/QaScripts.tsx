@@ -75,6 +75,7 @@ export interface QaScriptsProps {
   projects: QaProject[];
   refreshSignal: number;
   onChanged: () => void;
+  initialProjectId?: string;
 }
 
 export function QaScripts({
@@ -83,9 +84,13 @@ export function QaScripts({
   projects,
   refreshSignal,
   onChanged,
+  initialProjectId = "all",
 }: QaScriptsProps) {
   const tx = useQaCopy();
-  const [projectId, setProjectId] = useState<string>("all");
+  const [projectId, setProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());

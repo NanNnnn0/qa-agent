@@ -52,6 +52,7 @@ export interface QaRunsProps {
   projects: QaProject[];
   pollIntervalMs: number;
   refreshSignal: number;
+  initialProjectId?: string;
 }
 
 export function QaRuns({
@@ -60,10 +61,14 @@ export function QaRuns({
   projects,
   pollIntervalMs,
   refreshSignal,
+  initialProjectId = "all",
 }: QaRunsProps) {
   const tx = useQaCopy();
   const visible = usePageVisibility();
-  const [projectId, setProjectId] = useState<string>("all");
+  const [projectId, setProjectId] = useState<string>(initialProjectId);
+  useEffect(() => {
+    setProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
 

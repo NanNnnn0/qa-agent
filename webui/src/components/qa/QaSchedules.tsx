@@ -68,6 +68,7 @@ export interface QaSchedulesProps {
   refreshSignal: number;
   pollIntervalMs: number;
   onChanged: () => void;
+  initialProjectId?: string;
 }
 
 export function QaSchedules({
@@ -77,10 +78,14 @@ export function QaSchedules({
   refreshSignal,
   pollIntervalMs,
   onChanged,
+  initialProjectId = "all",
 }: QaSchedulesProps) {
   const tx = useQaCopy();
   const visible = usePageVisibility();
-  const [projectId, setProjectId] = useState("all");
+  const [projectId, setProjectId] = useState(initialProjectId);
+  useEffect(() => {
+    setProjectId(initialProjectId);
+  }, [initialProjectId]);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<QaSchedule | null>(null);
   const [deleting, setDeleting] = useState<QaSchedule | null>(null);

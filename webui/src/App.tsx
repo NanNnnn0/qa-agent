@@ -3200,6 +3200,7 @@ function Shell({
                   <Suspense fallback={<SurfaceLoadingFallback />}>
                     <QaWorkbench
                       token={getToken()}
+                      initialProjectId={activeSession?.qaProject?.id ?? "all"}
                       client={client}
                       onBackToChat={onBackToChat}
                     />
