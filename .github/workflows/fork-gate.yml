@@ -76,8 +76,6 @@ jobs:
         working-directory: webui
         run: npm ci --no-audit --no-fund
 
-      # Only the QA workbench suite is gated. The full WebUI suite has five known
-      # failures in chat-UI tests (see docs/STATUS.md) and would make every push red.
-      - name: QA workbench tests
+      - name: WebUI tests
         working-directory: webui
-        run: npx vitest run qa-
+        run: npm test

@@ -22,7 +22,7 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 | QA tests | `.venv/bin/python -m pytest tests/qa -q` | 83 passed in 8.59s (2026-10-18) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
-| Full WebUI suite | `cd webui && npm test` | 2792 passed, 5 failed; known, see Known gaps |
+| Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
 | Full suite | `.venv/bin/python -m pytest -q` | never run on this host |
 
 `pytest-asyncio` and `ruff` were missing from `.venv` and were installed on 2026-10-18. Before that, 26 async tests failed with `async def functions are not natively supported` and `ruff` did not exist. Both were missing dev dependencies, not product defects. A new checkout needs them before the gate means anything.
@@ -39,10 +39,9 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 ## Known gaps
 
 - CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests, with the same documentation-only filter on both events: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite, both on `ubuntu-24.04`. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
-- The full WebUI suite has seven failures unrelated to QA and is not gated. They are test/UI drift, not flakes: `app-layout.test.tsx` asserts the hero greeting on the blank start page, while the current composition renders `PaneWorkbench` (`data-testid="pane-grid"`, `workbench-pane-new-topic`). One of those assertions already waits ten seconds and still fails, so more waiting cannot close the gap.
-- A separate race does exist in the same file: `App.tsx` returns `StartupShell` while `state.status === "loading"`, and a test that queries right after `waitFor(() => expect(connectSpy).toHaveBeenCalled())` can run against the shell. It was observed once in the toggle-theme assertion; it is not the cause of the recurring seven.
-- Reproduce: `cd webui && DEBUG_PRINT_LIMIT=200000 npx vitest run src/tests/app-layout.test.tsx -t "opens a blank start page without creating an empty chat"`.
-- Fix direction: decide whether the blank-start composition is intended, then either update those assertions to the workbench contract or fix the composition; only after that should the full suite enter the gate.
+- The blank start page no longer renders the hero greeting: it was removed in favour of the workbench pane, and the owner confirmed that is intended. Seven assertions in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx` still expected the greeting, and two of those expected a `Back to chat` control that settings and apps no longer render when no chat is mounted. They were retargeted to `workbench-pane-new-topic` and a boot wait on 2026-10-18.
+- Do not reintroduce greeting assertions. `HERO_GREETING_PATTERN` was deleted with its last user, and the greeting component still exists only for the states that render it.
+- `App.tsx` still returns `StartupShell` while `state.status === "loading"`, so a test that queries immediately after `waitFor(() => expect(connectSpy).toHaveBeenCalled())` can run against the shell. Where that matters, wait for boot or pass an explicit timeout instead of relying on the default 1s budget; the sidebar `Temporary chat` wait needed 5s to stop being the last flaky assertion.
 - WebUI tests have never run on this host, so their state is unknown rather than green.
 - `nanobot/web/dist` and `.venv` are not tracked by git; a fresh clone is not a working deployment until both are rebuilt (see `deploy.md`).
 - There is no history before 2026-10-18: the tree was deployed as a tarball and captured as a single baseline commit.
