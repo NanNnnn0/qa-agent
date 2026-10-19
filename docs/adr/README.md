@@ -41,3 +41,4 @@ Each alternative with the reason it lost. This is the part that saves the next s
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
+| [0002](0002-api-asset-workflow.md) | Store API reference assets as catalog rows, revisions and batches | accepted |

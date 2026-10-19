@@ -2,6 +2,8 @@
 
 Verified on 2026-10-18 against the deployment host. This page answers "what works right now"; it is not a plan (see `ROADMAP.md`) and not a changelog (see `CHANGELOG.md`). Update it in the same commit that makes a fact here stop being true.
 
+The QA test row and the API asset layer were re-verified on 2026-10-19 in worktree `/opt/worktrees/qa-api-flow` (branch `feat/qa-api-testing`, based on `origin/main`); the deployment checkout itself still runs `feat/qa-trace`.
+
 ## Version control
 
 - History lives in the private remote `NanNnnn0/qa-agent`; `main` tracks `origin/main`.
@@ -19,7 +21,7 @@ Verified on 2026-10-18 against the deployment host. This page answers "what work
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 83 passed in 8.59s (2026-10-18) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 114 passed in 10.90s (2026-10-19, `feat/qa-api-testing`) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
@@ -31,11 +33,12 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 
 ## What exists
 
-- QA domain: `nanobot/qa/` (about 3.0k lines: `store`, `validation`, `runner`, `service`, `http`, `roles`, `seed`, `mcp_server`, `demo_server`).
+- QA domain: `nanobot/qa/` (about 3.9k lines: `store`, `catalog`, `validation`, `runner`, `service`, `http`, `roles`, `seed`, `mcp_server`, `demo_server`).
+- API asset layer (schema version 3): `api_operations` catalog, `api_case_metadata`, `api_case_revisions` and `api_workflows` in the same SQLite database. Every case write records a revision, catalog re-ingestion is idempotent and marks dropped endpoints `missing` instead of deleting them, and a candidate batch applies in one transaction. `export_cases` returns every case in scope plus `total`; the paged listing keeps its 500-row page cap.
 - HTTP and WebSocket surface: `/api/qa/*` routes plus `qa.*` mutation actions on the WebSocket channel.
 - Model-facing tools and skills: `nanobot/agent/tools/qa.py`, `spawn_task` in `nanobot/agent/subagent.py`, five `qa-*` skills.
 - QA workbench: `webui/src/components/qa/` and `webui/src/lib/qa-api.ts` (71 TS/TSX files including the API client).
-- Tests: `tests/qa/` (11 files) and `webui/src/tests/qa-*.test.tsx`.
+- Tests: `tests/qa/` (15 files) and `webui/src/tests/qa-*.test.tsx`.
 - Docs: `docs/qa-agent.md`, `docs/design/qa-platform.md`, `docs/design/qa-webui-brief.md`, `docs/research/` (4 files), plus the inherited upstream pages under `docs/`.
 
 ## Known gaps

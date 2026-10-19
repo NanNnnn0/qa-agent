@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from datetime import datetime, timezone
@@ -20,6 +21,11 @@ def new_id(prefix: str) -> str:
 
 def dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def sha256_json(value: Any) -> str:
+    """Stable content hash for a JSON value; equal content means equal hash."""
+    return hashlib.sha256(dumps(value).encode("utf-8")).hexdigest()
 
 
 def loads(text: str | None, default: Any) -> Any:
