@@ -154,3 +154,18 @@ UI 要求：工作台新增「定时任务」tab——列表（名称/项目/计
 启用/暂停、立即运行（结果用运行卡片展示）、删除确认。执行由网关进程内的 `QaScheduler` 负责：
 每 30 秒用条件更新领取到期的 `next_run_at`（多进程共享数据库时同一触发只会被执行一次），
 以 `trigger="schedule"` 写入既有 run 记录，浏览器关闭不影响。`cron` 为五段表达式，`timezone` 为 IANA 名称，留空用网关本地时区。
+
+## 8. 会话绑定 QA 项目（C 方案）
+
+会话可以显式绑定一个 QA 项目；未绑定会话行为完全不变。
+
+- 写入：WebSocket 命令 `set_qa_project`，payload `{chat_id, project_id | null}`（`null` 表示解除绑定）。
+  服务端校验项目存在后写入 session metadata `qa_project`（`{id,key,name}` 快照），并回发
+  `session_updated {chat_id, scope:"metadata", qa_project}`。
+- 读取：绑定随 turn metadata 进入运行时；工作台/选择器读取当前会话的绑定（UI 接线待补）。
+- Agent 上下文：绑定的会话每轮注入 QA 流程约束——功能/接口用例走 `qa_case`（用例库 YAML 真源），
+  自动化脚本先用 `qa_script` 登记再写仓库文件，执行走 `qa_run`，并遵循
+  `qa-functional-testing` / `qa-automation` skill。
+- 工具默认值：`qa_case` / `qa_script` / `qa_run` / `qa_task` 的 `project_id` 省略时取会话绑定，
+  显式传参优先。
+- 绑定入口只做显式选择（不按工作区路径自动绑定），避免“意外进入 QA 模式”。

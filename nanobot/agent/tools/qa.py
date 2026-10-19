@@ -27,6 +27,7 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.qa import service, shared_store
 from nanobot.qa.case_files import CaseFiles
+from nanobot.qa.chat_context import bound_project_id
 from nanobot.qa.roles import ROLE_LABELS, compose_prompt
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
@@ -110,6 +111,15 @@ class _QaTool(Tool):
 
     def _store(self) -> QaStore:
         return shared_store()
+
+    def _project_id(self, explicit: str | None) -> str | None:
+        """Default to the chat's bound QA project when the caller omitted it."""
+        if explicit:
+            return explicit
+        ctx = current_request_context()
+        if ctx is None:
+            return None
+        return bound_project_id(ctx.metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +274,7 @@ class QaCaseTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         library = CaseFiles(store)
         try:
             if action == "list":
@@ -419,6 +430,7 @@ class QaScriptTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 return _dumps(store.list_scripts(
@@ -520,6 +532,7 @@ class QaRunTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 return _dumps(store.list_runs(project_id=project_id, limit=limit or 50))
@@ -742,6 +755,7 @@ class QaTaskTool(_QaTool):
         **kwargs: Any,
     ) -> Any:
         store = self._store()
+        project_id = self._project_id(project_id)
         try:
             if action == "list":
                 payload = store.list_tasks(

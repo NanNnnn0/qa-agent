@@ -44,6 +44,7 @@ from nanobot.config.paths import is_default_workspace
 from nanobot.config.schema import Config
 from nanobot.gateway.runtime import GatewayInstance
 from nanobot.qa import shared_store
+from nanobot.qa.chat_context import qa_project_context
 from nanobot.qa.scheduler import QaScheduler
 from nanobot.security.network import is_loopback_host
 from nanobot.session.keys import (
@@ -560,6 +561,7 @@ def _run_gateway(
         tool_registry=tools,
         recovery_admission=recovery,
     )
+    agent.register_runtime_context_provider(qa_project_context)
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))
 
