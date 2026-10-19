@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Play, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Play, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +28,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import { QaDetailDrawer, QaDetailField, QaDetailSection } from "./QaDetailDrawer";
+import { groupQaScripts, type QaScriptModuleGroup } from "./qa-script-groups";
 import {
   formatQaDuration,
   formatQaTime,
@@ -87,6 +88,8 @@ export function QaScripts({
   const [projectId, setProjectId] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
+  const [collapsedModules, setCollapsedModules] = useState<Set<string>>(() => new Set());
 
   const scripts = useQaQuery(
     () =>
@@ -99,10 +102,37 @@ export function QaScripts({
   );
 
   const items = scripts.data?.items ?? [];
+  const groups = useMemo(() => groupQaScripts(items, projects), [items, projects]);
   const defaultProjectId = useMemo(
     () => (projectId !== "all" ? projectId : projects[0]?.id ?? ""),
     [projectId, projects],
   );
+
+  const toggleProject = (id: string) => {
+    setCollapsedProjects((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleModule = (id: string) => {
+    setCollapsedModules((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  /** `根目录`/`未分组` are buckets, not paths; only module keys read as paths. */
+  const moduleLabel = (module: QaScriptModuleGroup) =>
+    module.kind === "module"
+      ? module.key
+      : module.kind === "root"
+        ? tx("qa.scripts.groupRoot", "根目录")
+        : tx("qa.scripts.groupUngrouped", "未分组");
 
   return (
     <div className="flex flex-col gap-3" data-testid="qa-scripts">
@@ -170,62 +200,117 @@ export function QaScripts({
           }
         />
       ) : (
-        <QaTableShell label={tx("qa.scripts.title", "自动化脚本")}>
-          <thead>
-            <tr>
-              <th className={QA_TH_CLASS}>{tx("qa.scripts.name", "名称")}</th>
-              <th className={QA_TH_CLASS}>{tx("qa.scripts.framework", "框架")}</th>
-              <th className={QA_TH_CLASS}>{tx("qa.scripts.filePath", "文件路径")}</th>
-              <th className={cn(QA_TH_CLASS, "text-right")}>
-                {tx("qa.scripts.caseCount", "关联用例")}
-              </th>
-              <th className={QA_TH_CLASS}>{tx("qa.scripts.tags", "标签")}</th>
-              <th className={cn(QA_TH_CLASS, "text-right")}>
-                {tx("qa.scripts.updatedAt", "更新时间")}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((script) => (
-              <tr
-                key={script.id}
-                className="cursor-pointer hover:bg-muted/30"
-                onClick={() => setSelectedId(script.id)}
+        <div className="flex flex-col gap-4" data-testid="qa-script-groups">
+          {groups.map((group) => {
+            const projectOpen = !collapsedProjects.has(group.projectId);
+            const scriptCount = group.modules.reduce(
+              (total, module) => total + module.scripts.length,
+              0,
+            );
+            return (
+              <section
+                key={group.projectId}
+                data-testid={`qa-script-project-${group.projectId}`}
+                className="flex flex-col gap-2"
               >
-                <td className={QA_TD_CLASS}>
-                  <button
-                    type="button"
-                    className="block max-w-[22rem] truncate text-left font-medium text-foreground hover:underline"
-                    title={script.name}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedId(script.id);
-                    }}
-                  >
-                    {script.name || script.id}
-                  </button>
-                </td>
-                <td className={cn(QA_TD_CLASS, "text-[12px] text-muted-foreground")}>
-                  <span className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[11px]">
-                    {script.framework}
+                <button
+                  type="button"
+                  aria-expanded={projectOpen}
+                  data-testid={`qa-script-project-toggle-${group.projectId}`}
+                  onClick={() => toggleProject(group.projectId)}
+                  className="flex items-center gap-2 self-start rounded-lg px-1 py-0.5 text-left transition-colors hover:text-foreground"
+                >
+                  {projectOpen ? (
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  ) : (
+                    <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  )}
+                  <span className="font-mono text-[12px] font-semibold uppercase tracking-[0.04em] text-muted-foreground">
+                    {group.key}
                   </span>
-                </td>
-                <td className={cn(QA_TD_CLASS, "font-mono text-[11.5px] text-muted-foreground")}>
-                  <QaTruncate text={script.file_path} className="max-w-[18rem]" />
-                </td>
-                <td className={cn(QA_TD_CLASS, "text-right tabular-nums")}>
-                  {script.case_ids.length}
-                </td>
-                <td className={QA_TD_CLASS}>
-                  <QaTagChips tags={script.tags} limit={2} />
-                </td>
-                <td className={cn(QA_TD_CLASS, "text-right text-[12px] text-muted-foreground")}>
-                  {formatQaTime(script.updated_at)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </QaTableShell>
+                  {group.name ? (
+                    <span className="truncate text-sm font-semibold text-foreground">
+                      {group.name}
+                    </span>
+                  ) : null}
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                    {scriptCount}
+                  </span>
+                </button>
+
+                {projectOpen ? (
+                  <QaTableShell label={group.name ? `${group.key} ${group.name}` : group.key}>
+                    <thead>
+                      <tr>
+                        <th className={QA_TH_CLASS}>{tx("qa.scripts.name", "名称")}</th>
+                        <th className={QA_TH_CLASS}>{tx("qa.scripts.framework", "框架")}</th>
+                        <th className={QA_TH_CLASS}>{tx("qa.scripts.filePath", "文件路径")}</th>
+                        <th className={cn(QA_TH_CLASS, "text-right")}>
+                          {tx("qa.scripts.caseCount", "关联用例")}
+                        </th>
+                        <th className={QA_TH_CLASS}>{tx("qa.scripts.tags", "标签")}</th>
+                        <th className={cn(QA_TH_CLASS, "text-right")}>
+                          {tx("qa.scripts.updatedAt", "更新时间")}
+                        </th>
+                      </tr>
+                    </thead>
+                    {group.modules.map((module) => {
+                      const moduleId = `${group.projectId}::${module.kind}:${module.key}`;
+                      const moduleTestId = `${group.projectId}-${module.kind}-${module.key || "base"}`;
+                      const moduleOpen = !collapsedModules.has(moduleId);
+                      return (
+                        <tbody key={moduleId} data-testid={`qa-script-module-${moduleTestId}`}>
+                          <tr className="bg-muted/40">
+                            <td colSpan={6} className="border-b border-border/40 px-3 py-2">
+                              <button
+                                type="button"
+                                aria-expanded={moduleOpen}
+                                data-testid={`qa-script-module-toggle-${moduleTestId}`}
+                                onClick={() => toggleModule(moduleId)}
+                                className="flex items-center gap-1.5 rounded text-[12.5px] font-medium text-foreground"
+                              >
+                                {moduleOpen ? (
+                                  <ChevronDown
+                                    className="h-3.5 w-3.5 text-muted-foreground"
+                                    aria-hidden
+                                  />
+                                ) : (
+                                  <ChevronRight
+                                    className="h-3.5 w-3.5 text-muted-foreground"
+                                    aria-hidden
+                                  />
+                                )}
+                                <span
+                                  className={cn(
+                                    module.kind === "module" ? "font-mono" : "text-muted-foreground",
+                                  )}
+                                >
+                                  {moduleLabel(module)}
+                                </span>
+                                <span className="rounded-full bg-background/70 px-1.5 py-0.5 text-[10.5px] tabular-nums text-muted-foreground">
+                                  {module.scripts.length}
+                                </span>
+                              </button>
+                            </td>
+                          </tr>
+                          {moduleOpen
+                            ? module.scripts.map((script) => (
+                                <ScriptRow
+                                  key={script.id}
+                                  script={script}
+                                  onOpen={() => setSelectedId(script.id)}
+                                />
+                              ))
+                            : null}
+                        </tbody>
+                      );
+                    })}
+                  </QaTableShell>
+                ) : null}
+              </section>
+            );
+          })}
+        </div>
       )}
 
       <QaScriptDrawer
@@ -252,6 +337,47 @@ export function QaScripts({
         }}
       />
     </div>
+  );
+}
+
+function ScriptRow({ script, onOpen }: { script: QaScript; onOpen: () => void }) {
+  return (
+    <tr
+      data-testid={`qa-script-row-${script.id}`}
+      className="cursor-pointer hover:bg-muted/30"
+      onClick={onOpen}
+    >
+      <td className={QA_TD_CLASS}>
+        <button
+          type="button"
+          className="block max-w-[22rem] truncate text-left font-medium text-foreground hover:underline"
+          title={script.name}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+        >
+          {script.name || script.id}
+        </button>
+      </td>
+      <td className={cn(QA_TD_CLASS, "text-[12px] text-muted-foreground")}>
+        <span className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[11px]">
+          {script.framework}
+        </span>
+      </td>
+      <td className={cn(QA_TD_CLASS, "font-mono text-[11.5px] text-muted-foreground")}>
+        <QaTruncate text={script.file_path} className="max-w-[18rem]" />
+      </td>
+      <td className={cn(QA_TD_CLASS, "text-right tabular-nums")}>
+        {script.case_ids.length}
+      </td>
+      <td className={QA_TD_CLASS}>
+        <QaTagChips tags={script.tags} limit={2} />
+      </td>
+      <td className={cn(QA_TD_CLASS, "text-right text-[12px] text-muted-foreground")}>
+        {formatQaTime(script.updated_at)}
+      </td>
+    </tr>
   );
 }
 

@@ -113,6 +113,72 @@ const tracedCase = {
   yaml_path: "cases/TC-LOGIN-003.yaml",
 };
 
+
+/** Second project, so the script hierarchy is visibly project -> module. */
+const secondProject = {
+  ...project,
+  id: "proj-2",
+  key: "APP",
+  name: "移动端",
+  base_url: "",
+  stats: { cases: 1, ready_cases: 0, scripts: 2, runs: 0, active_tasks: 0 },
+};
+
+const scriptRows = [
+  {
+    id: "script-api",
+    project_id: "proj-1",
+    name: "登录脚本",
+    framework: "pytest",
+    language: "python",
+    file_path: "tests/api/test_login.py",
+    case_ids: ["case-1"],
+    tags: ["smoke"],
+    status: "ready",
+    created_at: "2026-02-01T02:00:00Z",
+    updated_at: "2026-02-01T02:00:00Z",
+  },
+  {
+    id: "script-ui",
+    project_id: "proj-1",
+    name: "下单脚本",
+    framework: "pytest",
+    language: "python",
+    file_path: "tests/ui/test_order.py",
+    case_ids: [],
+    tags: [],
+    status: "draft",
+    created_at: "2026-02-01T02:00:00Z",
+    updated_at: "2026-02-01T02:00:00Z",
+  },
+  {
+    id: "script-ungrouped",
+    project_id: "proj-1",
+    name: "无路径脚本",
+    framework: "pytest",
+    language: "python",
+    file_path: "",
+    case_ids: [],
+    tags: [],
+    status: "draft",
+    created_at: "2026-02-01T02:00:00Z",
+    updated_at: "2026-02-01T02:00:00Z",
+  },
+  {
+    id: "script-root",
+    project_id: "proj-2",
+    name: "冒烟脚本",
+    framework: "pytest",
+    language: "python",
+    file_path: "test_smoke.py",
+    case_ids: [],
+    tags: [],
+    status: "draft",
+    created_at: "2026-02-01T02:00:00Z",
+    updated_at: "2026-02-01T02:00:00Z",
+  },
+];
+
 const overviewPayload = {
   ok: true,
   counts: { projects: 1, cases: 12, ready_cases: 9, scripts: 3, runs: 4, tasks: 7, active_tasks: 2 },
@@ -198,6 +264,19 @@ function stubReviewTask(reviewTask: Record<string, unknown>) {
     }
     if (path === "/api/qa/tasks/task-1/events") {
       return jsonResponse({ ok: true, events: [] });
+    }
+    return null;
+  });
+}
+
+/** Two projects and four scripts spread over modules, the root and no path. */
+function stubScriptHierarchy() {
+  stubFetch((path) => {
+    if (path === "/api/qa/projects") {
+      return jsonResponse({ ok: true, projects: [project, secondProject] });
+    }
+    if (path === "/api/qa/scripts") {
+      return jsonResponse({ ok: true, items: scriptRows, total: scriptRows.length });
     }
     return null;
   });
@@ -483,5 +562,91 @@ describe("QA workbench", () => {
         expect.any(Number),
       );
     });
+  });
+
+  it("edits an existing project with qa.project.update", async () => {
+    const user = userEvent.setup();
+    const { requestMutation } = renderWorkbench();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qa-count-cases")).toHaveTextContent("12");
+    });
+    await user.click(screen.getByTestId("qa-project-edit"));
+
+    const dialog = await screen.findByTestId("qa-project-dialog");
+    expect(dialog).toHaveTextContent("编辑项目");
+    const nameInput = within(dialog).getByTestId("qa-project-name");
+    expect(nameInput).toHaveValue("Web 商城");
+    expect(within(dialog).getByTestId("qa-project-key")).toHaveValue("WEB");
+
+    await user.clear(nameInput);
+    await user.type(nameInput, "Web 商城 2.0");
+    await user.click(within(dialog).getByTestId("qa-project-submit"));
+
+    await waitFor(() => {
+      expect(requestMutation).toHaveBeenCalledWith(
+        "qa.project.update",
+        expect.objectContaining({
+          id: "proj-1",
+          key: "WEB",
+          name: "Web 商城 2.0",
+          base_url: "https://shop.example.test",
+        }),
+        expect.any(Number),
+      );
+    });
+  });
+
+  it("groups automation scripts by project and module", async () => {
+    stubScriptHierarchy();
+    renderWorkbench({ initialTab: "scripts" });
+
+    const firstProject = await screen.findByTestId("qa-script-project-proj-1");
+    expect(within(firstProject).getByText("WEB")).toBeInTheDocument();
+    expect(within(firstProject).getByText("Web 商城")).toBeInTheDocument();
+
+    const apiModule = within(firstProject).getByTestId(
+      "qa-script-module-proj-1-module-tests/api",
+    );
+    expect(within(apiModule).getByText("登录脚本")).toBeInTheDocument();
+    expect(within(apiModule).queryByText("下单脚本")).not.toBeInTheDocument();
+
+    const uiModule = within(firstProject).getByTestId(
+      "qa-script-module-proj-1-module-tests/ui",
+    );
+    expect(within(uiModule).getByText("下单脚本")).toBeInTheDocument();
+
+    // Path-less scripts land in their own bucket instead of creating a module.
+    const ungrouped = within(firstProject).getByTestId("qa-script-module-proj-1-ungrouped-base");
+    expect(within(ungrouped).getByText("未分组")).toBeInTheDocument();
+    expect(within(ungrouped).getByText("无路径脚本")).toBeInTheDocument();
+
+    // A project at the root of its repository gets a `根目录` bucket.
+    const secondGroup = screen.getByTestId("qa-script-project-proj-2");
+    const rootModule = within(secondGroup).getByTestId("qa-script-module-proj-2-root-base");
+    expect(within(rootModule).getByText("根目录")).toBeInTheDocument();
+    expect(within(rootModule).getByText("冒烟脚本")).toBeInTheDocument();
+  });
+
+  it("collapses a script module and then its project group", async () => {
+    stubScriptHierarchy();
+    const user = userEvent.setup();
+    renderWorkbench({ initialTab: "scripts" });
+
+    await screen.findByTestId("qa-script-row-script-api");
+    const moduleToggle = screen.getByTestId("qa-script-module-toggle-proj-1-module-tests/api");
+    expect(moduleToggle).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(moduleToggle);
+    expect(moduleToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("登录脚本")).not.toBeInTheDocument();
+    // Sibling modules stay visible: collapsing is per module, not per project.
+    expect(screen.getByText("下单脚本")).toBeInTheDocument();
+
+    const projectToggle = screen.getByTestId("qa-script-project-toggle-proj-1");
+    await user.click(projectToggle);
+    expect(projectToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("下单脚本")).not.toBeInTheDocument();
+    expect(screen.getByTestId("qa-script-project-proj-2")).toBeInTheDocument();
   });
 });

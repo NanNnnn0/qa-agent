@@ -814,6 +814,18 @@ export interface QaProjectInput {
   repo_path?: string;
 }
 
+/**
+ * Project edits send every field the dialog shows. An emptied input then
+ * clears the stored value instead of silently keeping the old one.
+ */
+export interface QaProjectUpdateInput {
+  key?: string;
+  name?: string;
+  description?: string;
+  base_url?: string;
+  repo_path?: string;
+}
+
 export interface QaCaseInput {
   project_id: string;
   title: string;
@@ -920,6 +932,19 @@ export async function createQaProject(
     transport,
     "qa.project.create",
     compactPayload({ ...input }),
+  );
+  return readEntity(payload, "project", normalizeProject);
+}
+
+export async function updateQaProject(
+  transport: QaMutationTransport,
+  id: string,
+  input: QaProjectUpdateInput,
+): Promise<QaProject> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.project.update",
+    compactUpdate({ id, ...input }),
   );
   return readEntity(payload, "project", normalizeProject);
 }
