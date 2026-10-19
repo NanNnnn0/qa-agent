@@ -21,13 +21,14 @@ The QA test row and the API asset layer were re-verified on 2026-10-19 in worktr
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 170 passed in 46.84s (2026-10-19, `feat/qa-api-testing`) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 248 passed in 50.90s (2026-10-19, `feat/qa-api-gateway-tools`) |
+| Adjacent suites | `.venv/bin/python -m pytest tests/agent tests/tools tests/gateway -q` | 3197 passed, 1 failed (`test_grep_searches_pdf_with_page_locator`: the `fitz` package is not installed) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 11 passed (2026-10-19) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
 
 CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 7m57s. The same WebUI suite takes 170s on this 6-vCPU host, so budget roughly three times the local run for CI; the webui job is capped at 15 minutes.
-| Full suite | `.venv/bin/python -m pytest -q` | never run on this host |
+| Full suite | `.venv/bin/python -m pytest -q` | still blocked at collection: `tests/qa/test_store.py` and `tests/qa_trace/test_models.py` duplicate basenames (`tests/pairing/test_store.py`, `tests/cli/test_models.py`) under the default import mode. `hatchling` was missing for `tests/test_documentation_build.py` and is now installed. With both colliding modules ignored the suite runs: 39 failed, 9653 passed, 80 skipped (2026-10-19, branch) and 37 failed, 9782 passed, 75 skipped (same day, `main`) - the same pre-existing failures in search tools, benchmarks, the websocket channel and the trace plugin |
 
 `pytest-asyncio` and `ruff` were missing from `.venv` and were installed on 2026-10-18. Before that, 26 async tests failed with `async def functions are not natively supported` and `ruff` did not exist. Both were missing dev dependencies, not product defects. A new checkout needs them before the gate means anything.
 
@@ -37,6 +38,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 - API asset layer (schema version 3): `api_operations` catalog, `api_case_metadata`, `api_case_revisions` and `api_workflows` in the same SQLite database. Every case write records a revision, catalog re-ingestion is idempotent and marks dropped endpoints `missing` instead of deleting them, and a candidate batch applies in one transaction. `export_cases` returns every case in scope plus `total`; the paged listing keeps its 500-row page cap.
 - HTTP and WebSocket surface: `/api/qa/*` routes plus `qa.*` mutation actions on the WebSocket channel.
 - Model-facing tools and skills: `nanobot/agent/tools/qa.py`, `spawn_task` in `nanobot/agent/subagent.py`, five `qa-*` skills; `nanobot/skills/qa-api-testing/SKILL.md` now leads with catalog ingestion and a staged batch.
+- API asset tools in the chat runtime (ADR 0010): `nanobot/agent/tools/qa_api.py` adapts `qa_api_catalog`, `qa_api_workflow` and `qa_api_run` to the `Tool` interface, so a chat turn registers 31 tools and the skill's fixed order is executable. `project_id` defaults to the chat's bound QA project. The three tools stay in the `core` scope only, because the subagent prompt budget has no room for their schemas.
 - MCP API asset tools: `qa_api_catalog` (ingest/list/get/diff), `qa_api_workflow` (create/get/validate/submit/apply/resume/export) and `qa_api_run` (preflight/start/get) in `nanobot/qa/api_tools.py`, registered in the stdio MCP server. Local OpenAPI files are only read under `NANOBOT_QA_SPEC_ROOTS`.
 - Pinned API runs: `nanobot/qa/execution.py` gates a run with preflight, executes ready cases through the fixed `nanobot/qa/templates/case_template.py` in a subprocess, pins each case revision in the run report, batches above 200 cases, masks credentials (bearer or JSON login, `env:NAME` references) and classifies every failure. `api.extract` plus `{{run.<name>}}` chains values between cases; a failed login persists a run with `classification: auth_failed`.
 - One run pipeline: `service.execute_cases` (the WebUI route, the `qa_run` tool, the CLI and scheduled runs) is an adapter over the same pinned pipeline, so every entry point refuses unready cases, pins revisions, batches and masks. Only `ready` cases execute; the old in-process loop and its 200-case cap are gone (ADR 0008).
@@ -50,6 +52,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 ## Known gaps
 
 - The workbench run button now refuses draft cases with the case codes; the release note for that behavior change is still owed to operators.
+- A dispatched `api` specialist does not have `qa_api_*` (main-agent scope only), yet `nanobot/qa/roles.py` names them in the role guide and the shared tool contract. Closing it needs a compact subagent facade or a decision to raise the subagent prompt budget.
 - A parallel session owns `feat/qa-workbench-polish` with its own schema v3 content (a `schedules` table and YAML case-index columns) and `nanobot/qa/scheduler.py`; this branch renamed its run queue to `nanobot/qa/run_queue.py`. Merging both needs a full gate run on the merged tree, not a version bump (ADR 0007).
 - CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests, with the same documentation-only filter on both events: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite, both on `ubuntu-24.04`. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
 - The blank start page no longer renders the hero greeting: it was removed in favour of the workbench pane, and the owner confirmed that is intended. Seven assertions in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx` still expected the greeting, and two of those expected a `Back to chat` control that settings and apps no longer render when no chat is mounted. They were retargeted to `workbench-pane-new-topic` and a boot wait on 2026-10-18.
