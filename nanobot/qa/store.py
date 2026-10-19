@@ -46,6 +46,10 @@ from nanobot.qa.validation import (
     validate_steps,
 )
 
+# v3 covers two additive changes made in parallel: the YAML case-index
+# columns (derived/legacy_id/yaml_path) and the schedules table. The SCHEMA
+# script runs on every open, so a database already at v3 still gains the
+# schedules table; the migration below only upgrades older databases.
 SCHEMA_VERSION = 3
 
 SCHEMA = """
