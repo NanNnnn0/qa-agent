@@ -25,6 +25,7 @@ from nanobot.qa.chat_context import (
     normalize_binding,
 )
 from nanobot.qa.validation import QaError
+from nanobot.qa.workspace import ensure_project_workspace
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_INPUT_META,
     WEBUI_QUOTE_METADATA,
@@ -500,6 +501,11 @@ class WebUICommandRouter:
             if raw_project_id:
                 try:
                     project = shared_store().get_project(raw_project_id.strip())
+                    repo_path = ensure_project_workspace(project)
+                    if repo_path != str(project.get("repo_path") or ""):
+                        project = shared_store().update_project(
+                            project["id"], repo_path=repo_path,
+                        )
                 except QaError:
                     await self._transport.webui_send_event(
                         connection, "error", detail="qa_project_rejected",

@@ -36,6 +36,7 @@ def binding_payload(project: dict[str, Any]) -> dict[str, str]:
         "id": str(project.get("id") or ""),
         "key": str(project.get("key") or ""),
         "name": str(project.get("name") or ""),
+        "repo_path": str(project.get("repo_path") or ""),
     }
 
 

@@ -53,13 +53,14 @@ from nanobot.qa.validation import (
     validate_api_spec,
     validate_steps,
 )
+from nanobot.qa.workspace import ensure_project_directory
 
 # v3 covers additive changes made in parallel: the YAML case-index columns
 # (derived/legacy_id/yaml_path), the schedules table, and the API asset tables
 # (api_operations, api_case_metadata, api_case_revisions, api_workflows). The
 # SCHEMA script runs on every open, so a database already at v3 still gains the
 # missing structures; the migration below only upgrades older databases.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -408,6 +409,19 @@ class QaStore:
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {ddl}")
             self._drop_case_code_constraint()
+        if version < 4:
+            # Every project owns a workspace directory; backfill projects
+            # created before auto-allocation existed.
+            rows = self._conn.execute(
+                "SELECT id, key, repo_path FROM projects"
+            ).fetchall()
+            for row in rows:
+                if str(row["repo_path"] or "").strip():
+                    continue
+                self._conn.execute(
+                    "UPDATE projects SET repo_path = ? WHERE id = ?",
+                    (ensure_project_directory(str(row["key"] or "")), row["id"]),
+                )
         # The API asset tables come from SCHEMA on every open, so they need no
         # migration branch; this marker only records the shared version.
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -519,6 +533,9 @@ class QaStore:
             raise QaConflictError(f"project key '{project_key}' already exists")
         now = utcnow_iso()
         project_id = new_id("proj")
+        repo_value = optional_text(repo_path, "repo_path", max_length=2000)
+        if not repo_value:
+            repo_value = ensure_project_directory(project_key)
         self._write(
             "INSERT INTO projects (id, key, name, description, base_url, repo_path,"
             " default_env, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -528,7 +545,7 @@ class QaStore:
                 title,
                 optional_text(description, "description"),
                 optional_text(base_url, "base_url", max_length=2000),
-                optional_text(repo_path, "repo_path", max_length=2000),
+                repo_value,
                 dumps(normalize_json_object(default_env, "default_env")),
                 now,
                 now,
@@ -571,13 +588,17 @@ class QaStore:
             updates[field] = value
         if not updates:
             return self.get_project(project_id)
-        self._require_project(project_id)
+        current = self._require_project(project_id)
         if "key" in updates:
             clash = self._fetchone(
                 "SELECT id FROM projects WHERE key = ? AND id != ?", (updates["key"], project_id)
             )
             if clash is not None:
                 raise QaConflictError(f"project key '{updates['key']}' already exists")
+        if "repo_path" in updates and not updates["repo_path"]:
+            updates["repo_path"] = ensure_project_directory(
+                str(updates.get("key") or current["key"])
+            )
         updates["updated_at"] = utcnow_iso()
         assignments = ", ".join(f"{field} = ?" for field in updates)
         self._write(

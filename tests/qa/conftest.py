@@ -29,6 +29,7 @@ def qa_case_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     root = tmp_path / "qa-workbench" / "projects"
     monkeypatch.setenv("NANOBOT_QA_TRACE_ROOT", str(root))
+    monkeypatch.setenv("NANOBOT_QA_PROJECTS_ROOT", str(tmp_path / "qa-projects"))
     return root
 
 

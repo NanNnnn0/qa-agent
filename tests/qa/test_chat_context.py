@@ -24,8 +24,14 @@ def test_normalize_binding_requires_an_id() -> None:
 
 
 def test_binding_payload_snapshots_the_project() -> None:
-    project = {"id": "proj_1", "key": "WEB", "name": "Web 商城", "base_url": "x"}
-    assert binding_payload(project) == BINDING
+    project = {
+        "id": "proj_1",
+        "key": "WEB",
+        "name": "Web 商城",
+        "base_url": "x",
+        "repo_path": "/srv/shop",
+    }
+    assert binding_payload(project) == {**BINDING, "repo_path": "/srv/shop"}
 
 
 def test_bound_project_id_reads_turn_metadata() -> None:
