@@ -2,7 +2,7 @@
 
 Verified on 2026-10-18 against the deployment host. This page answers "what works right now"; it is not a plan (see `ROADMAP.md`) and not a changelog (see `CHANGELOG.md`). Update it in the same commit that makes a fact here stop being true.
 
-The QA test row and the API asset layer were re-verified on 2026-10-19 in worktree `/opt/worktrees/qa-api-flow` (branch `feat/qa-api-testing`, based on `origin/main`); the deployment checkout itself still runs `feat/qa-trace`.
+The QA test row and the API asset layer were re-verified on 2026-10-19 in worktree `/opt/worktrees/qa-api-flow` (branch `feat/qa-api-testing`, based on `origin/main`) and again on the merged `main` in `/opt/worktrees/qa-merge`. The deployment checkout `/opt/qa-agent` is detached at `d7714fd` on the parallel schedule branch, so the running service does not serve this `main` yet.
 
 ## Version control
 
