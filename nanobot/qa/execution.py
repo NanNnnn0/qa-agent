@@ -26,8 +26,8 @@ from typing import Any
 
 import nanobot
 from nanobot.qa.auth import AuthProvider, mask_payload, mask_text
+from nanobot.qa.run_queue import shared_scheduler
 from nanobot.qa.runner import looks_like_environment_error, placeholders
-from nanobot.qa.scheduler import shared_scheduler
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
     QaError,

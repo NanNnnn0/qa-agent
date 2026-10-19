@@ -1,5 +1,8 @@
 """Background execution for pinned runs, serialized per project.
 
+Named ``run_queue`` rather than ``scheduler`` because a parallel session owns a
+cron ``qa.scheduler`` module; both are additive and neither imports the other.
+
 A run holds a project lock while it executes, so two runs of the same project
 never interleave their writes or their extracted values. Runs of different
 projects may proceed in parallel.

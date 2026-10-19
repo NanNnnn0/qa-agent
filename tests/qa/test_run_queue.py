@@ -8,7 +8,7 @@ import time
 import pytest
 
 from nanobot.qa.execution import execute_pinned_async, wait_for_run
-from nanobot.qa.scheduler import RunScheduler
+from nanobot.qa.run_queue import RunScheduler
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import QaValidationError
 

@@ -47,6 +47,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 
 ## Known gaps
 
+- A parallel session owns `feat/qa-workbench-polish` with its own schema v3 content (a `schedules` table and YAML case-index columns) and `nanobot/qa/scheduler.py`; this branch renamed its run queue to `nanobot/qa/run_queue.py`. Merging both needs a full gate run on the merged tree, not a version bump (ADR 0007).
 - CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests, with the same documentation-only filter on both events: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite, both on `ubuntu-24.04`. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
 - The blank start page no longer renders the hero greeting: it was removed in favour of the workbench pane, and the owner confirmed that is intended. Seven assertions in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx` still expected the greeting, and two of those expected a `Back to chat` control that settings and apps no longer render when no chat is mounted. They were retargeted to `workbench-pane-new-topic` and a boot wait on 2026-10-18.
 - Do not reintroduce greeting assertions. `HERO_GREETING_PATTERN` was deleted with its last user, and the greeting component still exists only for the states that render it.
