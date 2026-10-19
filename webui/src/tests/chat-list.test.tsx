@@ -34,6 +34,22 @@ function rect(top: number): DOMRect {
 }
 
 describe("ChatList", () => {
+  it("keeps project rows visible after every topic was deleted", () => {
+    render(
+      <ChatList
+        sessions={[]}
+        activeKey={null}
+        onSelect={vi.fn()}
+        projects={[
+          { id: "qa:p1", label: "SHOP", path: "/srv/shop", qaProjectId: "p1" },
+        ]}
+        onNewChatInProject={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("SHOP")).toBeInTheDocument();
+    expect(screen.getByTestId("project-new-chat-project:qa:p1")).toBeInTheDocument();
+  });
+
   const originalAnimate = HTMLElement.prototype.animate;
   const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
 

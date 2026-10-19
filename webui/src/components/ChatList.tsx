@@ -565,7 +565,13 @@ export const ChatList = memo(function ChatList({
     for (const animation of layoutAnimationsRef.current.values()) animation.cancel();
   }, []);
 
-  if (loading && sessions.length === 0 && temporarySessions.length === 0) {
+  const hasProjects = (projects?.length ?? 0) > 0;
+  if (
+    loading
+    && sessions.length === 0
+    && temporarySessions.length === 0
+    && !hasProjects
+  ) {
     return (
       <div className="px-3 py-6 text-[12px] text-sidebar-muted-foreground">
         {t("chat.loading")}
@@ -573,7 +579,7 @@ export const ChatList = memo(function ChatList({
     );
   }
 
-  if (sessions.length === 0 && temporarySessions.length === 0) {
+  if (sessions.length === 0 && temporarySessions.length === 0 && !hasProjects) {
     return (
       <div className="px-3 py-6 text-[12px] leading-5 text-sidebar-muted-foreground">
         {emptyLabel ?? t("chat.noSessions")}

@@ -1782,8 +1782,9 @@ function Shell({
   }, [getToken]);
 
   useEffect(() => {
+    if (!getToken()) return;
     void loadQaProjects().catch(() => {});
-  }, [loadQaProjects]);
+  }, [getToken, loadQaProjects]);
 
   const sidebarProjects = useMemo<ChatProjectDescriptor[]>(() => {
     const list: ChatProjectDescriptor[] = [];
