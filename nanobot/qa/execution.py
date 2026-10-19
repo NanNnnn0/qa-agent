@@ -6,6 +6,11 @@ it records which case revision each test executed, it runs the cases through the
 fixed pytest template instead of the caller's process, it splits more than one
 batch instead of silently truncating, and it masks every credential before the
 report is persisted.
+
+A run may carry an ordered plan with ``setup``, ``cases`` and ``cleanup`` phases.
+Steps reference a case id and optionally the revision they were written against;
+values extracted in an earlier phase are available to later phases as
+``run.<name>``. A failed setup step skips the cases phase but cleanup still runs.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ from nanobot.qa.validation import (
 )
 
 TEMPLATE_VERSION = "1"
+PLAN_VERSION = "1"
+PLAN_PHASES = ("setup", "cases", "cleanup")
 BATCH_SIZE = 200
 MAX_CASES_PER_RUN = 2000
 BATCH_TIMEOUT_S = 900
@@ -38,6 +45,91 @@ _TEMPLATE_PATH = Path(__file__).with_name("templates") / "case_template.py"
 # The template subprocess must import the same package as this process. Without
 # it, a worktree run would execute the deployed checkout's older runner.
 _PACKAGE_ROOT = str(Path(nanobot.__file__).resolve().parent.parent)
+
+
+# -- plan ------------------------------------------------------------------
+
+
+def normalize_plan(plan: Any) -> dict[str, Any]:
+    """Validate an ordered plan and return ``{version, setup, cases, cleanup}``."""
+    if plan is None:
+        return {"version": PLAN_VERSION, "setup": [], "cases": [], "cleanup": []}
+    if not isinstance(plan, dict):
+        raise QaValidationError("plan must be a JSON object")
+    unknown = set(plan) - {"version", *PLAN_PHASES}
+    if unknown:
+        raise QaValidationError(f"plan has unknown fields: {', '.join(sorted(unknown))}")
+    version = plan.get("version", PLAN_VERSION)
+    if not isinstance(version, str) or not version.strip():
+        raise QaValidationError("plan.version must be a non-empty string")
+    normalized: dict[str, Any] = {"version": version.strip()}
+    for phase in PLAN_PHASES:
+        steps = plan.get(phase) or []
+        if not isinstance(steps, list):
+            raise QaValidationError(f"plan.{phase} must be an array")
+        seen: set[str] = set()
+        phase_steps: list[dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise QaValidationError(f"plan.{phase}[{index}] must be an object")
+            extra = set(step) - {"case_id", "revision"}
+            if extra:
+                raise QaValidationError(
+                    f"plan.{phase}[{index}] has unknown fields: {', '.join(sorted(extra))}"
+                )
+            case_id = step.get("case_id")
+            if not isinstance(case_id, str) or not case_id.strip():
+                raise QaValidationError(f"plan.{phase}[{index}].case_id is required")
+            revision = step.get("revision")
+            if revision is not None and (
+                not isinstance(revision, int) or isinstance(revision, bool) or revision < 1
+            ):
+                raise QaValidationError(
+                    f"plan.{phase}[{index}].revision must be a positive integer"
+                )
+            key = case_id.strip()
+            if key in seen:
+                raise QaValidationError(f"plan.{phase} repeats case '{key}'")
+            seen.add(key)
+            phase_steps.append({"case_id": key, "revision": revision})
+        normalized[phase] = phase_steps
+    if not normalized["cases"] and not normalized["setup"]:
+        raise QaValidationError("plan needs at least one setup step or one case")
+    return normalized
+
+
+def _plan_phases(
+    store: QaStore, project_id: str, plan: Any,
+) -> tuple[str, dict[str, list[dict[str, Any]]]]:
+    normalized = normalize_plan(plan)
+    phases: dict[str, list[dict[str, Any]]] = {}
+    for phase in PLAN_PHASES:
+        steps: list[dict[str, Any]] = []
+        for index, step in enumerate(normalized[phase]):
+            case = store.get_case(step["case_id"])
+            if case["project_id"] != project_id:
+                raise QaValidationError(
+                    f"plan.{phase}[{index}] case '{step['case_id']}' does not belong "
+                    "to this project"
+                )
+            steps.append({"case": case, "revision": step["revision"]})
+        phases[phase] = steps
+    return normalized["version"], phases
+
+
+def _revision_problem(
+    store: QaStore, case: dict[str, Any], pinned: int | None,
+) -> str | None:
+    if pinned is None:
+        return None
+    revisions = store.list_case_revisions(case["id"], limit=1)["items"]
+    current = int(revisions[0]["revision"]) if revisions else 0
+    if pinned != current:
+        return (
+            f"plan pins revision {pinned} but the case is at revision {current}; "
+            "re-validate the plan against the current case"
+        )
+    return None
 
 
 # -- selection -------------------------------------------------------------
@@ -90,31 +182,53 @@ def preflight(
     case_ids: list[str] | None = None,
     kind: str | None = None,
     auth: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Report everything that would stop a run, before any request is sent."""
+    if plan is not None and case_ids:
+        raise QaValidationError("pass either plan or case_ids, not both")
     project = store.get_project(project_id)
     base_url = project.get("base_url") or ""
-    cases = _select_cases(store, project_id, case_ids, kind)
+    if plan is not None:
+        plan_version, phases = _plan_phases(store, project_id, plan)
+    else:
+        plan_version = PLAN_VERSION
+        phases = {
+            "setup": [],
+            "cases": [
+                {"case": case, "revision": None}
+                for case in _select_cases(store, project_id, case_ids, kind)
+            ],
+            "cleanup": [],
+        }
     variables = {
         str(key): str(value) for key, value in (project.get("default_env") or {}).items()
     }
     ready: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
-    for case in cases:
-        reasons = _case_problems(store, case, variables)
-        if reasons:
-            blocked.append({
+    for phase in PLAN_PHASES:
+        for index, step in enumerate(phases[phase]):
+            case = step["case"]
+            reasons = _case_problems(store, case, variables)
+            pinned = _revision_problem(store, case, step["revision"])
+            if pinned:
+                reasons.append(pinned)
+            entry = {
+                "phase": phase,
+                "index": index,
                 "case_id": case["id"],
                 "code": case["code"],
                 "title": case["title"],
-                "reasons": reasons,
-            })
-        else:
-            ready.append({"case_id": case["id"], "code": case["code"], "title": case["title"]})
+            }
+            if reasons:
+                blocked.append({**entry, "reasons": reasons})
+            else:
+                ready.append(entry)
+    total = sum(len(phases[phase]) for phase in PLAN_PHASES)
     blockers: list[str] = []
     if not base_url:
         blockers.append("project has no base_url configured")
-    if not cases:
+    if not total:
         blockers.append("no cases selected for this run")
     try:
         AuthProvider(auth, base_url=base_url or "http://127.0.0.1").validate()
@@ -123,7 +237,9 @@ def preflight(
     return {
         "project_id": project_id,
         "base_url": base_url,
-        "case_count": len(cases),
+        "plan_version": plan_version,
+        "phases": {phase: len(phases[phase]) for phase in PLAN_PHASES},
+        "case_count": total,
         "ready": ready,
         "blocked": blocked,
         "blockers": blockers,
@@ -180,7 +296,12 @@ def _catalog_problems(store: QaStore, case: dict[str, Any]) -> list[str]:
 # -- snapshot --------------------------------------------------------------
 
 
-def _snapshot(store: QaStore, cases: list[dict[str, Any]]) -> dict[str, Any]:
+def _snapshot(
+    store: QaStore,
+    cases: list[dict[str, Any]],
+    *,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Pin the case revisions and the template version this run executed."""
     entries = []
     for case in cases:
@@ -191,7 +312,28 @@ def _snapshot(store: QaStore, cases: list[dict[str, Any]]) -> dict[str, Any]:
             "revision": int(revisions[0]["revision"]) if revisions else 0,
             "content_hash": revisions[0]["content_hash"] if revisions else "",
         })
-    return {"template_version": TEMPLATE_VERSION, "cases": entries}
+    payload: dict[str, Any] = {"template_version": TEMPLATE_VERSION, "cases": entries}
+    if plan is not None:
+        payload["plan"] = plan
+    return payload
+
+
+def _plan_snapshot(
+    version: str, phases: dict[str, list[dict[str, Any]]], revisions: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "version": version,
+        "phases": {
+            phase: [
+                {
+                    "case_id": step["case"]["id"],
+                    "revision": revisions.get(step["case"]["id"], 0),
+                }
+                for step in phases[phase]
+            ]
+            for phase in PLAN_PHASES
+        },
+    }
 
 
 # -- execution -------------------------------------------------------------
@@ -204,13 +346,16 @@ def execute_pinned(
     case_ids: list[str] | None = None,
     kind: str | None = None,
     auth: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
     name: str = "",
     environment: str = "",
     trigger: str = "agent",
     batch_size: int = BATCH_SIZE,
 ) -> dict[str, Any]:
     """Run ready cases through the fixed template and persist one run row."""
-    checked = preflight(store, project_id, case_ids=case_ids, kind=kind, auth=auth)
+    checked = preflight(
+        store, project_id, case_ids=case_ids, kind=kind, auth=auth, plan=plan,
+    )
     if checked["blockers"]:
         raise QaValidationError("; ".join(checked["blockers"]))
     if checked["blocked"]:
@@ -222,15 +367,27 @@ def execute_pinned(
             f"{len(checked['blocked'])} case(s) cannot run: {detail}"
         )
     project = store.get_project(project_id)
-    cases = _select_cases(store, project_id, case_ids, kind)
+    if plan is not None:
+        plan_version, phases = _plan_phases(store, project_id, plan)
+    else:
+        plan_version = PLAN_VERSION
+        phases = {
+            "setup": [],
+            "cases": [
+                {"case": case, "revision": None}
+                for case in _select_cases(store, project_id, case_ids, kind)
+            ],
+            "cleanup": [],
+        }
+    ordered = [step["case"] for phase in PLAN_PHASES for step in phases[phase]]
     base_url = project.get("base_url") or ""
-    variables = {
-        str(key): str(value) for key, value in (project.get("default_env") or {}).items()
-    }
-    snapshot = _snapshot(store, cases)
+    snapshot = _snapshot(store, ordered)
+    if plan is not None:
+        revisions = {entry["case_id"]: entry["revision"] for entry in snapshot["cases"]}
+        snapshot["plan"] = _plan_snapshot(plan_version, phases, revisions)
     run = store.create_run(
         project_id,
-        case_ids=[case["id"] for case in cases],
+        case_ids=[case["id"] for case in ordered],
         name=name,
         environment=environment,
         trigger=trigger,
@@ -239,7 +396,9 @@ def execute_pinned(
     try:
         headers = provider.headers()
     except QaError as exc:
-        report = mask_payload(_failure_report(provider.kind, str(exc), snapshot), provider.secrets())
+        report = mask_payload(
+            _failure_report(provider.kind, str(exc), snapshot), provider.secrets()
+        )
         return store.finish_run(
             run["id"],
             status="error",
@@ -257,21 +416,54 @@ def execute_pinned(
     tests: list[dict[str, Any]] = []
     batches: list[dict[str, Any]] = []
     logs: list[str] = []
+    variables = {
+        str(key): str(value) for key, value in (project.get("default_env") or {}).items()
+    }
     size = max(1, min(int(batch_size or BATCH_SIZE), MAX_CASES_PER_RUN))
-    for start in range(0, len(cases), size):
-        chunk = cases[start:start + size]
-        chunk_tests, batch, log_text = _run_batch(
-            base_url, chunk, variables, headers, index=len(batches) + 1,
-        )
-        tests.extend(chunk_tests)
-        batches.append(batch)
-        if log_text:
-            logs.append(log_text)
+    setup_failed = False
+    for phase in PLAN_PHASES:
+        steps = phases[phase]
+        if not steps:
+            continue
+        if phase == "cases" and setup_failed:
+            tests.extend(
+                _skipped(step["case"], phase, "a setup step failed") for step in steps
+            )
+            continue
+        index = 0
+        while index < len(steps):
+            chunk = steps[index:index + size]
+            chunk_tests, batch, log_text, extracted = _run_batch(
+                base_url,
+                [step["case"] for step in chunk],
+                variables,
+                headers,
+                index=len(batches) + 1,
+                phase=phase,
+            )
+            tests.extend(chunk_tests)
+            batches.append(batch)
+            if log_text:
+                logs.append(log_text)
+            variables.update(
+                {f"run.{key}": str(value) for key, value in extracted.items()}
+            )
+            if phase == "setup" and any(
+                test["status"] != "passed" for test in chunk_tests
+            ):
+                setup_failed = True
+                tests.extend(
+                    _skipped(step["case"], phase, "an earlier setup step failed")
+                    for step in steps[index + len(chunk):]
+                )
+                break
+            index += len(chunk)
     duration_ms = int((time.perf_counter() - started) * 1000)
     summary = _summary(tests, duration_ms, len(batches))
     report_payload = {
         "reportFormat": "qa-agent.api.v1",
         "template_version": TEMPLATE_VERSION,
+        "plan_version": plan_version,
         "snapshot": snapshot,
         "auth": {"kind": provider.kind},
         "batches": batches,
@@ -300,7 +492,8 @@ def _run_batch(
     headers: dict[str, str],
     *,
     index: int,
-) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    phase: str = "cases",
+) -> tuple[list[dict[str, Any]], dict[str, Any], str, dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix=f"qa-run-{index}-") as tmp:
         directory = Path(tmp)
         template_target = directory / "test_qa_cases.py"
@@ -368,10 +561,14 @@ def _run_batch(
                 "message": "the run template did not report this case",
                 "checks": [],
             })
+        extracted: dict[str, Any] = {}
         for item in results:
-            item["classification"] = _classify(item)
+            item["phase"] = phase
+            item["classification"] = _classify(item, phase)
+            extracted.update(item.get("extracted") or {})
         batch = {
             "index": index,
+            "phase": phase,
             "cases": len(cases),
             "reported": len(reported),
             "exit_code": exit_code,
@@ -380,7 +577,7 @@ def _run_batch(
         log_text = (stdout or "")[-40_000:]
         if stderr:
             log_text += f"\n[stderr]\n{stderr[-20_000:]}"
-        return results, batch, log_text
+        return results, batch, log_text, extracted
 
 
 def _read_results(path: Path) -> list[dict[str, Any]]:
@@ -395,12 +592,28 @@ def _read_results(path: Path) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
-def _classify(test: dict[str, Any]) -> str:
+def _skipped(case: dict[str, Any], phase: str, reason: str) -> dict[str, Any]:
+    return {
+        "case_id": case["id"],
+        "code": case["code"],
+        "title": case["title"],
+        "status": "skipped",
+        "duration_ms": 0,
+        "message": reason,
+        "checks": [],
+        "phase": phase,
+        "classification": "dependency_blocked",
+    }
+
+
+def _classify(test: dict[str, Any], phase: str = "cases") -> str:
     status = test.get("status")
     if status == "passed":
         return "passed"
     if status == "skipped":
         return "skipped"
+    if phase == "cleanup":
+        return "cleanup_failed"
     if status == "error":
         if looks_like_environment_error(str(test.get("message", ""))):
             return "env_blocked"
@@ -411,7 +624,7 @@ def _classify(test: dict[str, Any]) -> str:
 def _summary(
     tests: list[dict[str, Any]], duration_ms: int, batch_count: int,
 ) -> dict[str, Any]:
-    return {
+    summary: dict[str, Any] = {
         "tests": len(tests),
         "passed": sum(1 for test in tests if test["status"] == "passed"),
         "failed": sum(1 for test in tests if test["status"] == "failed"),
@@ -420,6 +633,21 @@ def _summary(
         "duration": duration_ms,
         "batches": batch_count,
     }
+    phases: dict[str, Any] = {}
+    for phase in PLAN_PHASES:
+        subset = [test for test in tests if test.get("phase") == phase]
+        if not subset:
+            continue
+        phases[phase] = {
+            "tests": len(subset),
+            "passed": sum(1 for test in subset if test["status"] == "passed"),
+            "failed": sum(1 for test in subset if test["status"] == "failed"),
+            "skipped": sum(1 for test in subset if test["status"] == "skipped"),
+            "error": sum(1 for test in subset if test["status"] == "error"),
+        }
+    if phases:
+        summary["phases"] = phases
+    return summary
 
 
 def _run_status(tests: list[dict[str, Any]], summary: dict[str, Any]) -> str:
@@ -438,6 +666,7 @@ def _failure_report(
     return {
         "reportFormat": "qa-agent.api.v1",
         "template_version": TEMPLATE_VERSION,
+        "plan_version": PLAN_VERSION,
         "snapshot": snapshot,
         "auth": {"kind": kind},
         "classification": "auth_failed",
@@ -457,8 +686,10 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     summary = report.get("summary") or {}
     failed_tests = [
         {
+            "phase": test.get("phase", ""),
             "code": test.get("code"),
             "title": test.get("title"),
+            "status": test.get("status"),
             "classification": test.get("classification"),
             "message": str(test.get("message") or "")[:500],
         }
@@ -482,6 +713,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
         "summary": summary,
         "batches": report.get("batches") or [],
         "template_version": report.get("template_version", ""),
+        "plan_version": report.get("plan_version", ""),
         "snapshot": report.get("snapshot") or {},
         "failed_tests": failed_tests,
     }

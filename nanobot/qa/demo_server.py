@@ -5,6 +5,7 @@
 - ``GET  /api/products``  -> ``{"code":0,"items":[...]}``
 - ``POST /api/orders``    -> 201 ``{"code":0,"data":{"orderId":...}}``
 - ``GET  /api/orders/{id}``
+- ``DELETE /api/orders/{id}`` -> 200 ``{"code":0,"data":{"orderId":...,"status":"CANCELLED"}}``
 - ``POST /api/login``     -> 200 ``{"code":0,"data":{"token":...}}`` for qa / qa-pass
 - ``GET  /health``
 
@@ -75,6 +76,22 @@ class DemoHandler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"code": 0, "data": order})
             return
         _json_response(self, 404, {"code": 1004, "message": "not found"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if not path.startswith("/api/orders/"):
+            _json_response(self, 404, {"code": 1004, "message": "not found"})
+            return
+        order_id = path.rsplit("/", 1)[-1]
+        with _LOCK:
+            order = _ORDERS.pop(order_id, None)
+        if order is None:
+            _json_response(self, 404, {"code": 1002, "message": "order not found"})
+            return
+        _json_response(self, 200, {
+            "code": 0,
+            "data": {"orderId": order_id, "status": "CANCELLED"},
+        })
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path

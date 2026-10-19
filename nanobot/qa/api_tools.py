@@ -416,7 +416,16 @@ class QaApiRunTool(_QaApiTool):
                 "items": {"type": "string"},
                 "description": (
                     "Explicit case ids in run order; omit to run every case of the project "
-                    "matching kind."
+                    "matching kind. Not allowed together with plan."
+                ),
+            },
+            "plan": {
+                "type": "object",
+                "description": (
+                    "Ordered plan: {version, setup, cases, cleanup}; each step is "
+                    "{case_id, revision?}. Setup runs first, then cases, then cleanup; a "
+                    "failed setup step skips the cases phase while cleanup still runs. "
+                    "A pinned revision must match the case's current revision."
                 ),
             },
             "kind": {
@@ -461,6 +470,7 @@ class QaApiRunTool(_QaApiTool):
                 case_ids=self._case_ids(kwargs),
                 kind=_text(kwargs.get("kind"), "kind") or None,
                 auth=self._auth(kwargs),
+                plan=self._plan(kwargs),
             )
             return {"action": "preflight", **self._compact(checked)}
         if action == "start":
@@ -473,6 +483,7 @@ class QaApiRunTool(_QaApiTool):
                 case_ids=self._case_ids(kwargs),
                 kind=_text(kwargs.get("kind"), "kind") or None,
                 auth=self._auth(kwargs),
+                plan=self._plan(kwargs),
                 name=_text(kwargs.get("name"), "name"),
                 environment=_text(kwargs.get("environment"), "environment"),
                 trigger="agent",
@@ -503,12 +514,22 @@ class QaApiRunTool(_QaApiTool):
             raise QaValidationError("auth must be a JSON object")
         return value
 
+    def _plan(self, kwargs: dict[str, Any]) -> dict[str, Any] | None:
+        value = kwargs.get("plan")
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise QaValidationError("plan must be a JSON object")
+        return value
+
     def _compact(self, checked: dict[str, Any]) -> dict[str, Any]:
         ready = checked.get("ready") or []
         blocked = checked.get("blocked") or []
         return {
             "project_id": checked["project_id"],
             "base_url": checked["base_url"],
+            "plan_version": checked["plan_version"],
+            "phases": checked["phases"],
             "ok": checked["ok"],
             "case_count": checked["case_count"],
             "ready_count": len(ready),
