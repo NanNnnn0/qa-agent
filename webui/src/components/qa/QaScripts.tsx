@@ -487,7 +487,9 @@ export function QaRunResult({ run }: { run: QaRun }) {
       </p>
       {run.report?.summary ? (
         <p className="mt-1 whitespace-pre-wrap break-words text-[12.5px] text-foreground">
-          {run.report.summary}
+          {typeof run.report.summary === "string"
+            ? run.report.summary
+            : `${run.report.summary.passed}/${run.report.summary.tests} passed`}
         </p>
       ) : null}
     </QaPanel>
