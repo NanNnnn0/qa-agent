@@ -32,6 +32,7 @@ from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.binding import CronBindingError, binding_revision
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
+from nanobot.qa.chat_context import normalize_binding as _normalize_qa_binding
 from nanobot.qa.http import QA_MUTATION_PATHS as _QA_MUTATION_PATHS
 from nanobot.qa.http import QA_WRITE_PATHS as _QA_WRITE_PATHS
 from nanobot.security.workspace_access import WorkspaceScope, WorkspaceScopeError
@@ -1211,6 +1212,9 @@ class GatewayHTTPHandler:
                 session_metadata.get("updated_at") if session_metadata is not None else None
             ),
             "workspace_scope": scope.payload(),
+            "qa_project": _normalize_qa_binding(
+                ((session_metadata or {}).get("metadata") or {}).get("qa_project")
+            ),
         }
         initial_revision = webui_transcript_revision(decoded_key, variant=revision_variant)
         etag = _quoted_etag(initial_revision) if initial_revision is not None else None
@@ -1248,6 +1252,11 @@ class GatewayHTTPHandler:
         if data is None:
             return _http_error(404, "webui thread not found")
         data["workspace_scope"] = scope.payload()
+        qa_binding = _normalize_qa_binding(
+            ((session_metadata or {}).get("metadata") or {}).get("qa_project")
+        )
+        if qa_binding is not None:
+            data["qa_project"] = qa_binding
         latest_session_metadata = (
             self.session_manager.read_session_metadata(decoded_key)
             if self.session_manager is not None

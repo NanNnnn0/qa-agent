@@ -39,6 +39,13 @@ def binding_payload(project: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def qa_project_from_metadata(metadata: Any) -> dict[str, str] | None:
+    """Read the binding out of a session metadata dict (None when unbound)."""
+    if not isinstance(metadata, dict):
+        return None
+    return normalize_binding(metadata.get(QA_PROJECT_METADATA_KEY))
+
+
 def bound_project_id(metadata: Any) -> str | None:
     """Return the bound project id from turn/session metadata."""
     if not isinstance(metadata, dict):

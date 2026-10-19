@@ -75,4 +75,4 @@ type QaSchedule = {
 
 Implemented on 2026-10-19: the `schedules` table (schema v3), `nanobot/qa/schedule_time.py`, `nanobot/qa/scheduler.py`, the four `qa.schedule.*` actions, and the gateway-started `QaScheduler`.
 
-The chat binding half is implemented as session metadata `qa_project` written by the `set_qa_project` WebSocket command. The binding is copied into the turn metadata, a runtime context provider injects the QA workflow contract for bound chats, and the `qa_*` tools default `project_id` to it. The composer picker that writes the binding is the remaining UI piece.
+The chat binding half is implemented as session metadata `qa_project` written by the `set_qa_project` WebSocket command. The binding is copied into the turn metadata, a runtime context provider injects the QA workflow contract for bound chats, and the `qa_*` tools default `project_id` to it. The composer picker writes the binding; defaulting the QA workbench to the bound project is the remaining UI step.

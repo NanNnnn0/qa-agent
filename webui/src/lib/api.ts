@@ -205,6 +205,7 @@ export async function listSessions(
     run_started_at?: number | null;
     recovery_state?: RecoveryState | null;
     workspace_scope?: WorkspaceScopePayload | null;
+    qa_project?: { id: string; key: string; name: string } | null;
     handle?: SessionHandle | null;
   };
   const body = await request<{ sessions: Row[] }>(
@@ -227,6 +228,7 @@ export async function listSessions(
       runStartedAt: s.run_started_at ?? null,
       recoveryState: s.recovery_state ?? null,
       workspaceScope: s.workspace_scope ?? null,
+      qaProject: s.qa_project ?? null,
       handle,
     };
   });

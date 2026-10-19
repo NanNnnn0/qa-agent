@@ -84,6 +84,7 @@ import {
   type ModelPresetOption,
 } from "@/components/thread/ModelPresetBadge";
 import { ReasoningEffortMenu } from "@/components/thread/ReasoningEffortMenu";
+import { QaProjectControl } from "@/components/thread/QaProjectControl";
 import {
   ComposerUsagePopover,
   type ComposerContextUsage,
@@ -118,6 +119,7 @@ import type {
   WorkspaceScopePayload,
   WorkspacesPayload,
   ProjectDirectory,
+  QaProjectBinding,
   WorkspaceDirectoriesPayload,
 } from "@/lib/types";
 import {
@@ -250,6 +252,10 @@ interface ThreadComposerProps {
   workspaceDefaultScope?: WorkspaceScopePayload | null;
   workspaceControls?: WorkspacesPayload["controls"] | null;
   workspaceScopeDisabled?: boolean;
+  qaProject?: QaProjectBinding | null;
+  qaProjects?: QaProjectBinding[] | null;
+  onLoadQaProjects?: () => Promise<QaProjectBinding[]>;
+  onQaProjectChange?: (projectId: string | null) => void;
   workspaceError?: string | null;
   onFavoriteWorkspaceProject?: (path: string, pinned: boolean) => Promise<ProjectDirectory[]>;
   onResolveWorkspaceProject?: (path: string) => Promise<ProjectDirectory>;
@@ -997,6 +1003,10 @@ export function ThreadComposer({
   workspaceDefaultScope = null,
   workspaceControls = null,
   workspaceScopeDisabled = false,
+  qaProject = null,
+  qaProjects = null,
+  onLoadQaProjects,
+  onQaProjectChange,
   workspaceError = null,
   onLoadWorkspaceProjects,
   onResolveWorkspaceProject,
@@ -2435,6 +2445,15 @@ export function ThreadComposer({
       onChange={onWorkspaceScopeChange}
     />
   ) : null;
+  const qaProjectControl = onQaProjectChange ? (
+    <QaProjectControl
+      project={qaProject}
+      projects={qaProjects}
+      onLoadProjects={onLoadQaProjects ?? (async () => [])}
+      onChange={onQaProjectChange}
+      disabled={interactionDisabled}
+    />
+  ) : null;
   const workspaceControl = showProjectPicker ? (
     <WorkspaceProjectPicker
       layoutAnchor={workspacePickerLayoutAnchor}
@@ -2774,6 +2793,7 @@ export function ThreadComposer({
               <div className="thread-composer-workspace-group flex min-w-0 items-center gap-0.5">
                 {workspaceControl}
                 {accessControl}
+                {qaProjectControl}
               </div>
             )}
           </div>
@@ -2869,6 +2889,7 @@ export function ThreadComposer({
               <div className="inline-disclosure-content thread-composer-workspace-row flex min-w-0 items-center justify-between gap-2 rounded-b-[28px] bg-muted/45 px-3 py-1.5 dark:bg-white/[0.045] sm:px-4">
                 {workspaceControl}
                 <div className="ml-auto flex min-w-0 justify-end">{accessControl}</div>
+                {qaProjectControl}
               </div>
             </div>
           </div>
@@ -2877,6 +2898,7 @@ export function ThreadComposer({
       {compactControls && (!projectPickerAvailable || usageControl) ? (
         <div className="thread-composer-meta mx-auto flex w-full max-w-[58rem] items-center justify-between gap-2 px-3">
           {!projectPickerAvailable ? accessControl : null}
+          {!projectPickerAvailable ? qaProjectControl : null}
           <div className="ml-auto">{usageControl}</div>
         </div>
       ) : null}

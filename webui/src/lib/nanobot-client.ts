@@ -779,6 +779,16 @@ export class NanobotClient {
     });
   }
 
+  setQaProject(chatId: string, projectId: string | null): void {
+    if (this.temporaryChatIds.has(chatId)) return;
+    this.knownChats.add(chatId);
+    this.queueSend({
+      type: "set_qa_project",
+      chat_id: chatId,
+      project_id: projectId,
+    });
+  }
+
   setSidebarState(state: SidebarStatePayload): Promise<SidebarStatePayload> {
     return this.requestMutation<SidebarStatePayload>("sidebar.update", { state });
   }

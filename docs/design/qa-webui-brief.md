@@ -162,7 +162,7 @@ UI 要求：工作台新增「定时任务」tab——列表（名称/项目/计
 - 写入：WebSocket 命令 `set_qa_project`，payload `{chat_id, project_id | null}`（`null` 表示解除绑定）。
   服务端校验项目存在后写入 session metadata `qa_project`（`{id,key,name}` 快照），并回发
   `session_updated {chat_id, scope:"metadata", qa_project}`。
-- 读取：绑定随 turn metadata 进入运行时；工作台/选择器读取当前会话的绑定（UI 接线待补）。
+- 读取：绑定随 turn metadata 进入运行时；会话行/线程响应在绑定时带 `qa_project`（未绑定时不带，保持旧响应不变）；composer 的「QA 项目」选择器负责显式绑定/解除。
 - Agent 上下文：绑定的会话每轮注入 QA 流程约束——功能/接口用例走 `qa_case`（用例库 YAML 真源），
   自动化脚本先用 `qa_script` 登记再写仓库文件，执行走 `qa_run`，并遵循
   `qa-functional-testing` / `qa-automation` skill。
