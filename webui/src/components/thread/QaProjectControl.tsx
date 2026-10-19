@@ -35,6 +35,8 @@ export function QaProjectControl({
     project && !options.some((item) => item.id === project.id)
       ? [project, ...options]
       : options;
+  const current = project ? visible.find((item) => item.id === project.id) : undefined;
+  const missingRepo = Boolean(project && current && !current.repo_path);
   return (
     <div
       className={cn(
@@ -42,7 +44,13 @@ export function QaProjectControl({
         disabled && "pointer-events-none opacity-60",
       )}
       data-bound={project ? "true" : "false"}
-      title={project ? `${project.key} · ${project.name}` : undefined}
+      title={
+        project
+          ? `${project.key} · ${project.name}${
+              missingRepo ? t("qa.chatProject.noRepoHint", { defaultValue: " · 未配置仓库路径" }) : ""
+            }`
+          : undefined
+      }
     >
       <FlaskConical className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <select
@@ -63,6 +71,9 @@ export function QaProjectControl({
         {visible.map((item) => (
           <option key={item.id} value={item.id}>
             {item.key ? `${item.key} · ${item.name}` : item.name || item.id}
+            {item.repo_path === ""
+              ? t("qa.chatProject.noRepo", { defaultValue: "（未配置仓库）" })
+              : null}
           </option>
         ))}
       </select>

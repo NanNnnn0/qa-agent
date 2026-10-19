@@ -1099,8 +1099,7 @@ export function ThreadComposer({
     [pendingQueueKey],
   );
   const projectPickerAvailable =
-    isHero
-    && !!workspaceDefaultScope
+    !!workspaceDefaultScope
     && !!onWorkspaceScopeChange
     && !!onLoadWorkspaceProjects
     && !!onBrowseWorkspaceDirectories

@@ -1323,9 +1323,12 @@ function Shell({
   }, []);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [qaProjects, setQaProjects] = useState<
-    Array<{ id: string; key: string; name: string }> | null
+    Array<{ id: string; key: string; name: string; repo_path?: string }> | null
   >(null);
-  const qaProjectsRef = useRef<Array<{ id: string; key: string; name: string }> | null>(null);
+  const qaProjectsRef = useRef<
+    Array<{ id: string; key: string; name: string; repo_path?: string }> | null
+  >(null);
+  const [draftQaProjectId, setDraftQaProjectId] = useState<string | null>(null);
   const [draftWorkspaceScope, setDraftWorkspaceScope] =
     useState<WorkspaceScopePayload | null>(null);
   const [workspaceOverrides, setWorkspaceOverrides] =
@@ -1770,6 +1773,7 @@ function Shell({
       id: project.id,
       key: project.key,
       name: project.name,
+      repo_path: project.repo_path,
     }));
     qaProjectsRef.current = list;
     setQaProjects(list);
@@ -1778,12 +1782,32 @@ function Shell({
 
   const applyQaProject = useCallback(
     (projectId: string | null) => {
-      if (!activeChatId || temporaryChatActive) return;
+      const project = projectId
+        ? qaProjectsRef.current?.find((item) => item.id === projectId) ?? null
+        : null;
+      if (!activeChatId || temporaryChatActive) {
+        setDraftQaProjectId(projectId);
+        return;
+      }
       client.setQaProject(activeChatId, projectId);
+      if (project?.repo_path) {
+        client.setWorkspaceScope(activeChatId, {
+          project_path: project.repo_path,
+          access_mode: activeWorkspaceScope?.access_mode ?? "full",
+        });
+      }
       refresh();
     },
-    [activeChatId, temporaryChatActive, client, refresh],
+    [activeChatId, temporaryChatActive, activeWorkspaceScope, client, refresh],
   );
+
+  const draftQaProject = draftQaProjectId
+    ? qaProjects?.find((item) => item.id === draftQaProjectId) ?? null
+    : null;
+  const composerQaProject = activeSession?.qaProject
+    ?? (draftQaProject
+      ? { id: draftQaProject.id, key: draftQaProject.key, name: draftQaProject.name }
+      : null);
 
   const onCreateChat = useCallback(async (
     workspaceScope?: WorkspaceScopePayload | null,
@@ -1791,8 +1815,28 @@ function Shell({
     modelPreset?: string | null,
   ) => {
     try {
-      const scope = workspaceScope ?? activeWorkspaceScope;
+      const qaDraft = draftQaProjectId
+        ? qaProjectsRef.current?.find((item) => item.id === draftQaProjectId) ?? null
+        : null;
+      const qaScope: WorkspaceScopePayload | null = qaDraft?.repo_path
+        ? {
+            project_path: qaDraft.repo_path,
+            access_mode: activeWorkspaceScope?.access_mode ?? "full",
+          }
+        : null;
+      const scope = workspaceScope ?? qaScope ?? activeWorkspaceScope;
       const chatId = await createChat(scope, modelPreset);
+      if (draftQaProjectId) {
+        client.setQaProject(chatId, draftQaProjectId);
+        if (qaScope) {
+          client.setWorkspaceScope(chatId, qaScope);
+          setWorkspaceOverrides((current) => ({
+            ...current,
+            [chatId]: normalizeWorkspaceScope(qaScope),
+          }));
+        }
+        setDraftQaProjectId(null);
+      }
       const key = `websocket:${chatId}`;
       pendingCreatedSessionKeyRef.current = key;
       navigate({
@@ -3111,7 +3155,7 @@ function Shell({
                             workspaceScopeDisabled={activeChatRunning}
                             workspaceError={workspaceError}
                             onWorkspaceScopeChange={applyWorkspaceScope}
-                            qaProject={activeSession?.qaProject ?? null}
+                            qaProject={composerQaProject}
                             qaProjects={qaProjects}
                             onLoadQaProjects={loadQaProjects}
                             onQaProjectChange={applyQaProject}

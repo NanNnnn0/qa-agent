@@ -5,6 +5,7 @@
 - Verified: `pytest tests/qa` → 149 passed；`pytest ... -k workspace_scope` → 4 passed；`ruff check` 通过。
 - UI：会话行/线程响应带 `qa_project`（未绑定不带）；`nanobot-client.setQaProject`；composer 的 `QaProjectControl`（原生 select，懒加载项目列表）；组件测试 `qa-project-control.test.tsx`。
 - 工作台：新增「当前项目」scope（默认全部项目），从绑定会话打开时默认该项目，并把 scope 传给用例库/自动化/定时任务/运行记录四个 tab（各 tab 本地筛选与 scope 同步）。
+- 工作区联动：已有会话也显示工作区选择器（不再只在空白起始页）；绑定 QA 项目时若该项目配置了 `repo_path`，同步把会话工作区切到该路径（起始页的草稿选择在创建会话时应用）；未配置仓库的项目在选择项里标注「未配置仓库」。
 - Verified: `vitest run qa-` → 30 passed；全量 `npm test` 的既有 5 条 drift 不变；`tsc`、eslint 通过。
 - Not done: 无（需求 2 完成）；未合并 `main`。
 - Affects other sessions: 新增 WebSocket 命令 `set_qa_project` 与 session metadata `qa_project`；`qa_*` 工具的 `project_id` 变为可选（有会话绑定时生效）。未绑定会话零变化。

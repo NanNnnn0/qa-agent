@@ -465,6 +465,8 @@ export interface QaProjectBinding {
   id: string;
   key: string;
   name: string;
+  /** Repo path from the project list; absent on a stored session binding. */
+  repo_path?: string;
 }
 
 export interface WorkspaceScopePayload {
