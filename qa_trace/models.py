@@ -752,6 +752,7 @@ class Automation:
 _CASE_KEYS = {
     "schema_version",
     "id",
+    "code",
     "title",
     "testpoints",
     "sources",
@@ -764,16 +765,72 @@ _CASE_KEYS = {
     "risk",
     "preconditions",
     "postconditions",
+    "expected",
+    "api",
     "data",
     "owner",
     "tags",
     "note",
+    "legacy_id",
 }
+
+
+def _read_api_spec(reader: _Reader) -> Mapping[str, Any] | None:
+    """Validate the optional structured API block stored on a case.
+
+    The block is the executable contract the httpx runner consumes
+    (``request``/``assertions``/``variables``).  The full normalisation lives in
+    the product layer (``nanobot.qa.validation.validate_api_spec``); the library
+    only refuses shapes that could never execute, so a hand-written YAML case
+    fails at load time instead of at run time.
+    """
+    raw = reader.optional_mapping("api")
+    if raw is None:
+        return None
+    if not raw:
+        return None
+    request = raw.get("request")
+    if request is not None:
+        if not isinstance(request, Mapping):
+            raise FieldInvalidError(
+                "api.request must be a mapping", path=reader.path, field="api.request"
+            )
+        path = request.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise FieldInvalidError(
+                "api.request.path must be a non-empty string",
+                path=reader.path,
+                field="api.request.path",
+            )
+        method = request.get("method", "GET")
+        if not isinstance(method, str) or not method.strip():
+            raise FieldInvalidError(
+                "api.request.method must be a string", path=reader.path, field="api.request.method"
+            )
+    assertions = raw.get("assertions")
+    if assertions is not None and not isinstance(assertions, Sequence):
+        raise FieldInvalidError(
+            "api.assertions must be a list", path=reader.path, field="api.assertions"
+        )
+    variables = raw.get("variables")
+    if variables is not None and not isinstance(variables, Mapping):
+        raise FieldInvalidError(
+            "api.variables must be a mapping", path=reader.path, field="api.variables"
+        )
+    return dict(raw)
 
 
 @dataclass(frozen=True, slots=True)
 class Case:
-    """An executable test case traced to test points or, exceptionally, sources."""
+    """An executable test case traced to test points or, exceptionally, sources.
+
+    ``code``, ``expected``, ``api`` and ``legacy_id`` exist for the workbench and
+    the agent-tool compatibility layer: ``code`` is the human-facing case number
+    (``SHOP-API-001``), ``expected`` the case-level expected result next to the
+    per-step expectations, ``api`` the structured request/assertion contract the
+    httpx runner executes, and ``legacy_id`` the SQLite row a case was migrated
+    from.  YAML stays the single source of truth: none of them are derived.
+    """
 
     id: str
     title: str
@@ -786,8 +843,12 @@ class Case:
     sources: tuple[str, ...] = ()
     direct_reason: str | None = None
     risk: Risk | None = None
+    code: str | None = None
     preconditions: str | None = None
     postconditions: str | None = None
+    expected: str | None = None
+    api: Mapping[str, Any] | None = None
+    legacy_id: str | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
     owner: str | None = None
     tags: tuple[str, ...] = ()
@@ -843,8 +904,12 @@ class Case:
             sources=sources,
             direct_reason=direct_reason,
             risk=risk,
+            code=reader.optional_str("code"),
             preconditions=reader.optional_str("preconditions"),
             postconditions=reader.optional_str("postconditions"),
+            expected=reader.optional_str("expected"),
+            api=_read_api_spec(reader),
+            legacy_id=reader.optional_str("legacy_id"),
             data=data_value,
             owner=reader.optional_str("owner"),
             tags=_read_tags(reader),

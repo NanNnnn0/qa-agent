@@ -1,0 +1,27 @@
+schema_version: 1
+id: TC-SHOP-007
+code: SHOP-UI-001
+legacy_id: case_2909871b5826
+title: 购物车结算流程：库存充足时下单成功
+testpoints:
+- TP-SHOP-005
+priority: P1
+type: ui
+status: reviewed
+steps:
+- action: 打开购物车页面
+  expected: 展示 A-1，数量 2，金额 398
+- action: 点击【去结算】
+  expected: 进入订单确认页
+- action: 点击【提交订单】
+  expected: 提示下单成功并跳转订单详情
+automation:
+  status: manual
+preconditions: 已登录，购物车含 A-1 两件
+expected: 订单创建成功，购物车清空
+owner: qa-agent
+note: migrated from the legacy SQLite case case_2909871b5826
+tags:
+- cart
+- regression
+source: ai

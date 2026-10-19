@@ -26,6 +26,7 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from nanobot.qa import service
+from nanobot.qa.case_files import CaseFiles
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
     QaConflictError,
@@ -78,6 +79,33 @@ QA_MUTATION_PATHS: dict[str, str] = {
 
 QA_WRITE_PATHS = frozenset(QA_MUTATION_PATHS.values())
 
+#: Fields a case write may carry.  The first block is the legacy workbench
+#: contract; the second is the trace link a case needs before it can leave
+#: ``draft/`` for ``cases/``.
+_CASE_WRITE_FIELDS = frozenset({
+    "title",
+    "kind",
+    "code",
+    "priority",
+    "status",
+    "preconditions",
+    "steps",
+    "api",
+    "expected",
+    "tags",
+    "source",
+    "author",
+    "batch",
+    "testpoints",
+    "sources",
+    "direct_reason",
+    "risk",
+    "postconditions",
+    "owner",
+    "note",
+})
+
+
 
 def _error(status: int, message: str) -> Response:
     return _json({"ok": False, "error": message}, status=status)
@@ -108,6 +136,15 @@ class QaApi:
         # tests and demos point the adapter at a temporary project root.
         self.trace_root = trace_root
         self._trace_api: Any = None
+        self._case_files: CaseFiles | None = None
+
+    # -- YAML case library -------------------------------------------------
+
+    def _cases(self) -> CaseFiles:
+        """Return the YAML-backed case library (SQLite only indexes it)."""
+        if self._case_files is None:
+            self._case_files = CaseFiles(self.store, self.trace_root)
+        return self._case_files
 
     # -- trace adapter -----------------------------------------------------
 
@@ -169,10 +206,10 @@ class QaApi:
         if path.startswith(f"{QA_PREFIX}/projects/"):
             return _ok({"project": store.get_project(path.rsplit("/", 1)[-1])})
         if path == f"{QA_PREFIX}/cases/export":
-            payload = store.export_cases(_query_first(query, "project_id") or None)
+            payload = self._cases().export_cases(_query_first(query, "project_id") or None)
             return _ok(payload)
         if path == f"{QA_PREFIX}/cases":
-            return _ok(store.list_cases(
+            return _ok(self._cases().list_cases(
                 project_id=_query_first(query, "project_id") or None,
                 kind=_query_first(query, "kind") or None,
                 status=_query_first(query, "status") or None,
@@ -181,7 +218,7 @@ class QaApi:
                 offset=_int_query(query, "offset", 0),
             ))
         if path.startswith(f"{QA_PREFIX}/cases/"):
-            return _ok({"case": store.get_case(path.rsplit("/", 1)[-1])})
+            return _ok({"case": self._cases().get_case(path.rsplit("/", 1)[-1])})
         if path == f"{QA_PREFIX}/scripts":
             return _ok(store.list_scripts(
                 project_id=_query_first(query, "project_id") or None,
@@ -288,12 +325,9 @@ class QaApi:
             store.delete_project(_require_id(payload))
             return _ok({"deleted": True})
         if path == "/api/qa/cases/create":
-            case = store.create_case(
+            case = self._cases().create_case(
                 (_require_field(payload, "project_id")),
-                **_fields(payload, {
-                    "title", "kind", "code", "priority", "status", "preconditions",
-                    "steps", "api", "expected", "tags", "source", "author",
-                }),
+                **_fields(payload, _CASE_WRITE_FIELDS),
             )
             return _ok({"case": case})
         if path == "/api/qa/cases/bulk-create":
@@ -310,28 +344,30 @@ class QaApi:
                     errors.append({"index": index, "error": "case must be an object"})
                     continue
                 try:
-                    created.append(store.create_case(
+                    created.append(self._cases().create_case(
                         project_id,
-                        **_fields(item, {
-                            "title", "kind", "code", "priority", "status", "preconditions",
-                            "steps", "api", "expected", "tags", "source", "author",
-                        }),
+                        **_fields(item, _CASE_WRITE_FIELDS),
                     ))
                 except QaError as exc:
                     errors.append({"index": index, "error": str(exc)})
             return _ok({"cases": created, "errors": errors, "created": len(created)})
         if path == "/api/qa/cases/update":
-            case = store.update_case(_require_id(payload), **_fields(payload, {
-                "title", "kind", "code", "priority", "status", "preconditions", "steps",
-                "api", "expected", "tags", "source", "author",
-            }))
+            case = self._cases().update_case(
+                _require_id(payload), **_fields(payload, _CASE_WRITE_FIELDS)
+            )
             return _ok({"case": case})
         if path == "/api/qa/cases/delete":
-            store.delete_case(_require_id(payload))
+            self._cases().delete_case(
+                _require_id(payload),
+                reason=str(payload.get("reason") or "") or None,
+                reviewer=str(payload.get("reviewer") or "") or None,
+            )
             return _ok({"deleted": True})
         if path == "/api/qa/cases/import":
             project_id = _require_field(payload, "project_id")
-            result = store.import_cases(project_id, payload.get("payload", payload.get("cases")))
+            result = self._cases().import_cases(
+                project_id, payload.get("payload", payload.get("cases"))
+            )
             return _ok(result)
         if path == "/api/qa/scripts/create":
             script = store.create_script(

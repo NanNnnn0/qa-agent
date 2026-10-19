@@ -56,6 +56,8 @@ INPUT_ERROR_CODES: frozenset[str] = frozenset(
         "TRACE_DIFF_BASE_MISSING",
         "TRACE_DIFF_GIT_FAILED",
         "TRACE_DIFF_INVALID",
+        # P6: the SQLite export reads a database that may be unusable.
+        "TRACE_MIGRATE_INVALID",
     }
 )
 

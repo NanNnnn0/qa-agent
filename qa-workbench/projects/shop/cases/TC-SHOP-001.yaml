@@ -1,0 +1,40 @@
+schema_version: 1
+id: TC-SHOP-001
+code: SHOP-API-001
+legacy_id: case_ef31197f7e34
+title: 商品列表返回 200 且 items 为数组
+testpoints:
+- TP-SHOP-001
+priority: P0
+type: api
+status: reviewed
+steps:
+- action: GET /api/products
+  expected: 返回 200，code=0，items 存在
+automation:
+  status: todo
+expected: 返回 200，code=0，items 存在
+api:
+  assertions:
+  - expect: 200
+    type: status
+  - expect: 0
+    op: equals
+    path: $.code
+    type: json_path
+  - op: exists
+    path: $.items
+    type: json_path
+  request:
+    body: null
+    headers: {}
+    method: GET
+    path: /api/products
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_ef31197f7e34
+tags:
+- smoke
+- catalog
+source: ai

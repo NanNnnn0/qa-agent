@@ -39,7 +39,9 @@ from .models import Case, Source, TestPoint
 
 #: Version of the digest recipe.  Bump it when a hashed payload changes, so old
 #: indexes are refused instead of silently comparing incompatible digests.
-FINGERPRINT_VERSION = 1
+#: Version 2 added the case business fields ``code``/``expected``/``api``/
+#: ``legacy_id`` (the workbench case fields, still YAML source of truth).
+FINGERPRINT_VERSION = 2
 
 KIND_SOURCE = "source"
 KIND_TESTPOINT = "testpoint"
@@ -118,6 +120,13 @@ def testpoint_payload(testpoint: TestPoint) -> dict[str, Any]:
     }
 
 
+def _canonical_mapping(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a JSON-ready copy of a nested mapping (``None`` stays ``None``)."""
+    if value is None:
+        return None
+    return json.loads(json.dumps(dict(value), default=_json_default))
+
+
 def case_payload(case: Case) -> dict[str, Any]:
     """Return the hashed business fields of a case."""
     binding = case.automation.script
@@ -137,8 +146,12 @@ def case_payload(case: Case) -> dict[str, Any]:
             "script": binding.script if binding is not None else None,
         },
         "risk": case.risk.value if case.risk is not None else None,
+        "code": case.code,
         "preconditions": case.preconditions,
         "postconditions": case.postconditions,
+        "expected": case.expected,
+        "api": _canonical_mapping(case.api),
+        "legacy_id": case.legacy_id,
         "data": dict(case.data),
         "owner": case.owner,
         "tags": list(case.tags),

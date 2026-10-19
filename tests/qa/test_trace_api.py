@@ -31,7 +31,9 @@ from nanobot.qa.validation import (
 from qa_trace import run_check
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEMO_PROJECT = REPO_ROOT / "qa-workbench" / "projects" / "login-lock"
+# A pristine copy lives in the test fixtures so demos and live edits of
+# qa-workbench/projects/login-lock cannot break these tests.
+DEMO_PROJECT = REPO_ROOT / "tests" / "qa" / "fixtures" / "trace" / "login-lock"
 
 
 def _body(response: Any) -> dict[str, Any]:

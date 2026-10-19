@@ -36,7 +36,6 @@ unreadable index).
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -44,8 +43,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-import yaml
 
 from .diagnostics import Diagnostic, Severity, from_error, relative_path, sort_diagnostics
 from .errors import (
@@ -68,6 +65,7 @@ from .index import (
     ProjectIndex,
     clear_draft_record,
     load_index,
+    load_index_for_write,
     record_draft_rejection,
     require_compatible,
     upsert_baseline,
@@ -95,6 +93,7 @@ from .models import (
 )
 from .rules import check_graph
 from .staleness import recheck_map, utc_now
+from .yamlfile import write_yaml
 
 #: Version of the ``review list`` JSON document.
 REVIEW_VERSION = 1
@@ -145,24 +144,7 @@ def _check_batch(batch: str) -> str:
 
 def _write_yaml(path: Path, payload: Mapping[str, Any]) -> Path:
     """Write ``payload`` to ``path`` atomically and return the final path."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(
-        dict(payload),
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-    )
-    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return path
+    return write_yaml(path, payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +214,7 @@ def list_batches(root: str | Path) -> tuple[str, ...]:
     )
 
 
-def _read_draft(
+def read_draft_entity(
     path: Path, *, batch: str, kind: str, index: ProjectIndex
 ) -> DraftEntity:
     errors: list[QaTraceError] = []
@@ -342,7 +324,7 @@ def load_batch(
         for path in sorted(directory.iterdir()):
             if not path.is_file() or path.suffix.lower() not in YAML_SUFFIXES:
                 continue
-            drafts.append(_read_draft(path, batch=batch, kind=kind, index=active_index))
+            drafts.append(read_draft_entity(path, batch=batch, kind=kind, index=active_index))
     return tuple(drafts)
 
 
@@ -1081,7 +1063,7 @@ def approve(
     """Promote one draft, or re-review one formal test point/case."""
     moment = now if now is not None else utc_now()
     project = load_project(root)
-    index = require_compatible(load_index(project.root, project_id=project.config.project_id))
+    index = load_index_for_write(project.root, project_id=project.config.project_id)
     matches = _select_drafts(project.root, entity_id, batch=batch, index=index)
     if matches:
         draft = _one_draft(matches, entity_id, batch)
@@ -1103,7 +1085,7 @@ def reject(
     """Record the rejection of one draft; the file stays in ``draft/``."""
     moment = now if now is not None else utc_now()
     project = load_project(root)
-    index = require_compatible(load_index(project.root, project_id=project.config.project_id))
+    index = load_index_for_write(project.root, project_id=project.config.project_id)
     draft = find_draft(project.root, entity_id, batch=batch, index=index)
     if draft.file_hash is None:  # pragma: no cover - the file was just read
         raise DraftError(f"cannot read {draft.path}", path=draft.path)
@@ -1162,7 +1144,7 @@ class DraftListing:
 def list_drafts(root: str | Path, *, batch: str | None = None) -> DraftListing:
     """Return every draft of a project (or one batch)."""
     project = load_project(root)
-    index = require_compatible(load_index(project.root, project_id=project.config.project_id))
+    index = load_index_for_write(project.root, project_id=project.config.project_id)
     if batch is not None:
         drafts = load_batch(project.root, _check_batch(batch), index=index)
     else:
@@ -1242,6 +1224,7 @@ __all__ = [
     "load_batch",
     "new_draft",
     "promoted_entity",
+    "read_draft_entity",
     "reject",
     "render_draft_list",
     "render_review_outcome",

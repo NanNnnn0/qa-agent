@@ -1,0 +1,322 @@
+{
+  "exported_from": "nanobot qa sqlite cases table (derived=0, i.e. the pre-migration rows)",
+  "project": {
+    "id": "proj_8a86656ab0fa",
+    "key": "SHOP",
+    "name": "Demo 商城"
+  },
+  "exported_rows": 8,
+  "cases": [
+    {
+      "legacy_id": "case_ef31197f7e34",
+      "code": "SHOP-API-001",
+      "title": "商品列表返回 200 且 items 为数组",
+      "kind": "api",
+      "priority": "P0",
+      "status": "ready",
+      "expected": "返回 200，code=0，items 存在",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 200,
+            "type": "status"
+          },
+          {
+            "expect": 0,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          },
+          {
+            "op": "exists",
+            "path": "$.items",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": null,
+          "headers": {},
+          "method": "GET",
+          "path": "/api/products",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "smoke",
+        "catalog"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_0ebe3f67e135",
+      "code": "SHOP-API-002",
+      "title": "正常下单返回 201 并生成订单号",
+      "kind": "api",
+      "priority": "P0",
+      "status": "ready",
+      "expected": "下单成功，返回订单号",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 201,
+            "type": "status"
+          },
+          {
+            "expect": 0,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          },
+          {
+            "op": "exists",
+            "path": "$.data.orderId",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": {
+            "qty": 2,
+            "sku": "A-1"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "path": "/api/orders",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "smoke",
+        "order"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_20543cc753ce",
+      "code": "SHOP-API-003",
+      "title": "库存不足时下单被拒绝（code=1001）",
+      "kind": "api",
+      "priority": "P0",
+      "status": "ready",
+      "expected": "返回 400 + 业务码 1001，不创建订单",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 400,
+            "type": "status"
+          },
+          {
+            "expect": 1001,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": {
+            "qty": 999,
+            "sku": "A-1"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "path": "/api/orders",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "order",
+        "negative"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_11f6b2b8c9b1",
+      "code": "SHOP-API-004",
+      "title": "数量非法（qty=0）返回参数错误 1000",
+      "kind": "api",
+      "priority": "P1",
+      "status": "ready",
+      "expected": "参数校验生效",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 400,
+            "type": "status"
+          },
+          {
+            "expect": 1000,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": {
+            "qty": 0,
+            "sku": "A-1"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "path": "/api/orders",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "order",
+        "negative",
+        "boundary"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_1c0f6b289624",
+      "code": "SHOP-API-005",
+      "title": "未知 SKU 返回 404 + 1002",
+      "kind": "api",
+      "priority": "P1",
+      "status": "ready",
+      "expected": "返回 SKU 不存在",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 404,
+            "type": "status"
+          },
+          {
+            "expect": 1002,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": {
+            "qty": 1,
+            "sku": "NOPE-999"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "path": "/api/orders",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "order",
+        "negative"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_b2abe9fd315c",
+      "code": "SHOP-API-006",
+      "title": "缺少 qty 时返回参数错误",
+      "kind": "api",
+      "priority": "P1",
+      "status": "ready",
+      "expected": "缺少必填参数被拒绝",
+      "steps": [],
+      "api": {
+        "assertions": [
+          {
+            "expect": 400,
+            "type": "status"
+          },
+          {
+            "expect": 1000,
+            "op": "equals",
+            "path": "$.code",
+            "type": "json_path"
+          }
+        ],
+        "request": {
+          "body": {
+            "sku": "A-1"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "path": "/api/orders",
+          "query": {}
+        },
+        "variables": {}
+      },
+      "tags": [
+        "order",
+        "negative"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_2909871b5826",
+      "code": "SHOP-UI-001",
+      "title": "购物车结算流程：库存充足时下单成功",
+      "kind": "ui",
+      "priority": "P1",
+      "status": "ready",
+      "expected": "订单创建成功，购物车清空",
+      "steps": [
+        {
+          "action": "打开购物车页面",
+          "expected": "展示 A-1，数量 2，金额 398"
+        },
+        {
+          "action": "点击【去结算】",
+          "expected": "进入订单确认页"
+        },
+        {
+          "action": "点击【提交订单】",
+          "expected": "提示下单成功并跳转订单详情"
+        }
+      ],
+      "api": {},
+      "tags": [
+        "cart",
+        "regression"
+      ],
+      "source": "ai"
+    },
+    {
+      "legacy_id": "case_d1145d885706",
+      "code": "SHOP-UI-002",
+      "title": "库存不足时前端拦截结算",
+      "kind": "ui",
+      "priority": "P1",
+      "status": "ready",
+      "expected": "不创建订单，错误提示可理解",
+      "steps": [
+        {
+          "action": "点击【去结算】",
+          "expected": "提示库存不足，停留在购物车"
+        },
+        {
+          "action": "刷新页面",
+          "expected": "商品仍在购物车，未生成订单"
+        }
+      ],
+      "api": {},
+      "tags": [
+        "cart",
+        "negative"
+      ],
+      "source": "ai"
+    }
+  ]
+}

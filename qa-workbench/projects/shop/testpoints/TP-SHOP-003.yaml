@@ -1,0 +1,16 @@
+schema_version: 1
+id: TP-SHOP-003
+module: SHOP
+title: 下单参数与业务码校验
+sources:
+- EX-SHOP-01
+method: boundary
+risk: medium
+status: reviewed
+owner: qa-agent
+tags:
+- shop
+- order
+- api
+- validation
+note: 覆盖 TC-SHOP-004/005/006（qty=0 → 1000、未知 SKU → 404+1002、缺 qty → 参数错误）

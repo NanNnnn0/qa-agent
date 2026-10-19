@@ -267,6 +267,12 @@ class DiffInputError(QaTraceError):
     code = "TRACE_DIFF_INVALID"
 
 
+class MigrateError(QaTraceError):
+    """The SQLite case export cannot run (database, project or argument unusable)."""
+
+    code = "TRACE_MIGRATE_INVALID"
+
+
 class QaTraceGroupError(QaTraceError):
     """Several independent errors found in one scan.
 

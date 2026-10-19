@@ -338,6 +338,23 @@ def require_compatible(index: ProjectIndex) -> ProjectIndex:
     )
 
 
+def load_index_for_write(
+    project_root: str | Path, *, project_id: str | None = None
+) -> ProjectIndex:
+    """Read the index for a mutation, treating an incompatible one as empty.
+
+    The index is derived, so a write never has to fail because a previous build
+    wrote it with another fingerprint recipe: the mutation records fresh hashes
+    and the stale baseline is simply gone (which is exactly what
+    ``qa trace stale --write`` would do).  Read-only callers keep using
+    :func:`require_compatible` so an unreadable/obsolete index stays visible.
+    """
+    index = load_index(project_root, project_id=project_id)
+    if index.compatible:
+        return index
+    return ProjectIndex(root=Path(project_root), project_id=index.project_id or project_id)
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     """Write ``payload`` atomically (temporary file, fsync, ``os.replace``)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -468,6 +485,7 @@ __all__ = [
     "clear_draft_record",
     "index_path",
     "load_index",
+    "load_index_for_write",
     "record_draft_rejection",
     "require_compatible",
     "upsert_baseline",
