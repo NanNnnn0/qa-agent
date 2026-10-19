@@ -55,6 +55,7 @@ import {
   COLLAPSED_CHATS_VISIBLE_COUNT,
   displayTitle,
   groupSessions,
+  type ChatProjectDescriptor,
   isCollapsedProject,
   isFoldableChatsGroup,
   isFoldedChatsGroup,
@@ -239,7 +240,12 @@ interface ChatListProps {
   ) => void;
   onToggleGroup?: (groupId: string) => void;
   onRequestRenameProject?: (projectKey: string, label: string) => void;
-  onNewChatInProject?: (projectPath: string, projectName: string) => void;
+  onNewChatInProject?: (
+    projectPath: string,
+    projectName: string,
+    qaProjectId?: string,
+  ) => void;
+  projects?: ChatProjectDescriptor[];
   pinnedKeys?: string[];
   archivedKeys?: string[];
   pinnedPaneKeys?: string[];
@@ -281,6 +287,7 @@ export const ChatList = memo(function ChatList({
   onToggleGroup,
   onRequestRenameProject,
   onNewChatInProject,
+  projects,
   pinnedKeys = [],
   archivedKeys = [],
   pinnedPaneKeys = [],
@@ -399,6 +406,7 @@ export const ChatList = memo(function ChatList({
       showArchived,
       sort,
       defaultWorkspacePath,
+      projects,
     }),
     [
       archivedKeys,
@@ -411,6 +419,7 @@ export const ChatList = memo(function ChatList({
       projectNameOverrides,
       sessionOrder,
       defaultWorkspacePath,
+      projects,
     ],
   );
   const limitedGroups = useMemo(
@@ -757,7 +766,15 @@ export const ChatList = memo(function ChatList({
                       }
                       onNewChat={
                         group.projectPath && onNewChatInProject
-                          ? () => onNewChatInProject(group.projectPath ?? "", group.label)
+                          ? () => (
+                              group.qaProjectId
+                                ? onNewChatInProject(
+                                    group.projectPath ?? "",
+                                    group.label,
+                                    group.qaProjectId,
+                                  )
+                                : onNewChatInProject(group.projectPath ?? "", group.label)
+                            )
                           : undefined
                       }
                       actionMenuPortalContainer={actionMenuPortalContainer}
@@ -774,6 +791,25 @@ export const ChatList = memo(function ChatList({
                       && "sidebar-child-list ms-4 pb-1",
                   )}
                 >
+                  {group.kind === "project" && onNewChatInProject ? (
+                    <button
+                      type="button"
+                      data-testid={`project-new-chat-${group.id}`}
+                      onClick={() => (
+                        group.qaProjectId
+                          ? onNewChatInProject(
+                              group.projectPath ?? "",
+                              group.label,
+                              group.qaProjectId,
+                            )
+                          : onNewChatInProject(group.projectPath ?? "", group.label)
+                      )}
+                      className="mb-0.5 flex w-full min-w-0 items-center gap-2 rounded-control px-2 py-1 text-left text-[12.5px] text-sidebar-muted-foreground transition-colors media-hover:hover:bg-foreground/[0.055] media-hover:hover:text-sidebar-foreground"
+                    >
+                      <span aria-hidden>+</span>
+                      <span className="truncate">{t("sidebar.newChat")}</span>
+                    </button>
+                  ) : null}
                   <ul className="space-y-0.5">
                   {visibleSessions.map((s) => {
                     const topicActive = s.key === activeKey;

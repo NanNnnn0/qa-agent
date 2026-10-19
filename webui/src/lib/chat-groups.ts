@@ -11,7 +11,16 @@ export interface SessionGroup {
   kind?: "project";
   projectPath?: string;
   projectKey?: string;
+  qaProjectId?: string;
   updatedAt?: string | null;
+}
+
+/** One project row in the conversation sidebar (QA project or workspace dir). */
+export interface ChatProjectDescriptor {
+  id: string;
+  label: string;
+  path?: string | null;
+  qaProjectId?: string;
 }
 
 export interface ChatGroupLabels {
@@ -34,6 +43,7 @@ export interface ChatGroupingOptions {
   showArchived: boolean;
   sort: SidebarSortMode;
   defaultWorkspacePath?: string | null;
+  projects?: ChatProjectDescriptor[];
 }
 
 export function groupSessions(
@@ -41,7 +51,7 @@ export function groupSessions(
   labels: ChatGroupLabels,
   options: ChatGroupingOptions,
 ): SessionGroup[] {
-  if (sessions.some((session) => session.workspaceScope?.project_path)) {
+  if (options.projects?.length || sessions.some((session) => session.workspaceScope?.project_path)) {
     return groupSessionsByProject(sessions, labels, options);
   }
 
@@ -154,7 +164,7 @@ export function limitGroups(
     if (activeKey && visible.some((session) => session.key === activeKey)) {
       activeVisible = true;
     }
-    if (visible.length > 0) {
+    if (visible.length > 0 || group.kind === "project") {
       out.push({ ...group, sessions: visible });
     }
   }
@@ -233,49 +243,79 @@ function groupSessionsByProject(
   options: ChatGroupingOptions,
 ): SessionGroup[] {
   const archived = new Set(options.archivedKeys);
+  const pinned = new Set(options.pinnedKeys);
   const conversations: ChatSummary[] = [];
-  const buckets = new Map<string, {
+  interface Bucket {
+    key: string;
     path?: string;
     label: string;
+    qaProjectId?: string;
     sessions: ChatSummary[];
     updatedAt: string | null;
-  }>();
+  }
+  const buckets = new Map<string, Bucket>();
+  const byQaProject = new Map<string, Bucket>();
+  const byPath = new Map<string, Bucket>();
+
+  const addDescriptor = (project: ChatProjectDescriptor) => {
+    const pathKey = project.path ? normalizeWorkspacePath(project.path) : "";
+    const key = project.qaProjectId ? `qa:${project.qaProjectId}` : pathKey;
+    if (!key || buckets.has(key)) return;
+    const bucket: Bucket = {
+      key,
+      path: project.path ?? undefined,
+      label: project.label,
+      qaProjectId: project.qaProjectId,
+      sessions: [],
+      updatedAt: null,
+    };
+    buckets.set(key, bucket);
+    if (project.qaProjectId) byQaProject.set(project.qaProjectId, bucket);
+    if (project.path) byPath.set(normalizeWorkspacePath(project.path), bucket);
+  };
+  for (const project of options.projects ?? []) addDescriptor(project);
 
   for (const session of sessions) {
     if (archived.has(session.key) && !options.showArchived) {
       continue;
     }
-    const scope = session.workspaceScope;
-    const path = scope?.project_path || "";
-    if (!path || sameWorkspacePath(path, options.defaultWorkspacePath)) {
+    const path = session.workspaceScope?.project_path || "";
+    let bucket = session.qaProject?.id
+      ? byQaProject.get(session.qaProject.id)
+      : undefined;
+    if (!bucket && path && !sameWorkspacePath(path, options.defaultWorkspacePath)) {
+      const normalized = normalizeWorkspacePath(path);
+      bucket = byPath.get(normalized);
+      if (!bucket) {
+        bucket = {
+          key: normalized,
+          path,
+          label: options.projectNameOverrides[normalized]?.trim()
+            || session.workspaceScope?.project_name?.trim()
+            || projectNameFromPath(path),
+          sessions: [],
+          updatedAt: null,
+        };
+        buckets.set(bucket.key, bucket);
+        byPath.set(normalized, bucket);
+      }
+    }
+    if (!bucket) {
       conversations.push(session);
       continue;
     }
-    const key = normalizeWorkspacePath(path);
-    const label = options.projectNameOverrides[key]?.trim()
-      || scope?.project_name?.trim()
-      || projectNameFromPath(path);
-    const bucket = buckets.get(key) ?? {
-      path,
-      label,
-      sessions: [],
-      updatedAt: null,
-    };
     bucket.sessions.push(session);
     const candidate = session.updatedAt ?? session.createdAt ?? null;
-    if (isNewerDate(candidate, bucket.updatedAt)) {
-      bucket.updatedAt = candidate;
-    }
-    buckets.set(key, bucket);
+    if (isNewerDate(candidate, bucket.updatedAt)) bucket.updatedAt = candidate;
   }
 
-  const pinned = new Set(options.pinnedKeys);
-  const groups: SessionGroup[] = Array.from(buckets.entries()).map(([key, bucket]) => ({
-    id: `project:${key}`,
+  const groups: SessionGroup[] = Array.from(buckets.values()).map((bucket) => ({
+    id: `project:${bucket.key}`,
     label: bucket.label,
     kind: "project" as const,
     projectPath: bucket.path,
-    projectKey: key,
+    projectKey: bucket.path ? normalizeWorkspacePath(bucket.path) : undefined,
+    qaProjectId: bucket.qaProjectId,
     updatedAt: bucket.updatedAt,
     sessions: sortProjectSessions(
       bucket.sessions,

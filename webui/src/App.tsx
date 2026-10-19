@@ -102,6 +102,7 @@ import {
   toRuntimeSurface,
 } from "@/lib/runtime";
 import { projectNameFromPath, scopeWithAccessMode } from "@/lib/workspace";
+import type { ChatProjectDescriptor } from "@/lib/chat-groups";
 import {
   createTemporaryChatSession,
   deriveTemporaryChatTitle,
@@ -1784,42 +1785,23 @@ function Shell({
     void loadQaProjects().catch(() => {});
   }, [loadQaProjects]);
 
-  const openQaProjectChat = useCallback(
-    async (projectId: string) => {
-      const project = qaProjectsRef.current?.find((item) => item.id === projectId);
-      if (!project) return;
-      const repoPath = project.repo_path;
-      const scope: WorkspaceScopePayload | null = repoPath
-        ? {
-            project_path: repoPath,
-            access_mode: activeWorkspaceScope?.access_mode ?? "full",
-          }
-        : activeWorkspaceScope;
-      try {
-        const chatId = await createChat(scope);
-        client.setQaProject(chatId, projectId);
-        if (repoPath) {
-          const overrideScope: WorkspaceScopePayload = {
-            project_path: repoPath,
-            access_mode: activeWorkspaceScope?.access_mode ?? "full",
-          };
-          setWorkspaceOverrides((current) => ({
-            ...current,
-            [chatId]: normalizeWorkspaceScope(overrideScope),
-          }));
-        }
-        navigate({
-          view: "chat",
-          activeKey: `websocket:${chatId}`,
-          settingsSection: "overview",
-        });
-        setMobileSidebarOpen(false);
-      } catch (error) {
-        console.error("Failed to open QA project chat", error);
-      }
-    },
-    [activeWorkspaceScope, client, createChat, navigate],
-  );
+  const sidebarProjects = useMemo<ChatProjectDescriptor[]>(() => {
+    const list: ChatProjectDescriptor[] = [];
+    for (const project of qaProjects ?? []) {
+      list.push({
+        id: `qa:${project.id}`,
+        label: project.key || project.name,
+        path: project.repo_path || null,
+        qaProjectId: project.id,
+      });
+    }
+    for (const favorite of workspaces?.favorite_projects ?? []) {
+      if (list.some((item) => item.path && item.path === favorite.path)) continue;
+      list.push({ id: `path:${favorite.path}`, label: favorite.name, path: favorite.path });
+    }
+    return list;
+  }, [qaProjects, workspaces?.favorite_projects]);
+
 
   const applyQaProject = useCallback(
     (projectId: string | null) => {
@@ -2014,7 +1996,8 @@ function Shell({
   }, [activeKey, view]);
 
   const onNewChatInProject = useCallback(
-    (projectPath: string, projectName: string) => {
+    (projectPath: string, projectName: string, qaProjectId?: string) => {
+      if (qaProjectId) setDraftQaProjectId(qaProjectId);
       const base = workspaces?.default_scope ?? activeWorkspaceScope;
       const trimmed = projectPath.trim();
       if (!base || !trimmed) {
@@ -2957,8 +2940,7 @@ function Shell({
     onOpenChannels,
     onOpenSkills,
     onOpenQa,
-    qaProjects: qaProjects ?? undefined,
-    onOpenQaProject: openQaProjectChat,
+    projects: sidebarProjects,
     onSettingsIntent,
     onOpenSearch: onOpenSessionSearch,
     activeUtility: !managingConnections && (view === "apps" || view === "automations" || view === "skills" || view === "channels" || view === "qa") ? view : null,

@@ -24,7 +24,6 @@ import {
   type SidebarDeleteItem,
   type SidebarPaneGroup,
 } from "@/components/ChatList";
-import { SidebarQaProjects } from "@/components/SidebarQaProjects";
 import { DispatchRail } from "@/components/dispatch/DispatchRail";
 import { useDispatchDesk } from "@/components/dispatch/dispatch-desk-context";
 import { HostSwitcher } from "@/components/remote/HostSwitcher";
@@ -39,6 +38,7 @@ import type {
   SidebarViewState,
 } from "@/lib/types";
 import { sessionsWithoutDispatchChildren, type DispatchTask } from "@/lib/dispatch-desk";
+import type { ChatProjectDescriptor } from "@/lib/chat-groups";
 import { cn } from "@/lib/utils";
 import { sidebarShortcutAria, sidebarShortcutLabel } from "@/lib/sidebar-shortcuts";
 
@@ -68,13 +68,16 @@ interface SidebarProps {
   ) => void;
   onToggleGroup: (groupId: string) => void;
   onRequestRenameProject: (projectKey: string, label: string) => void;
-  onNewChatInProject: (projectPath: string, projectName: string) => void;
+  onNewChatInProject: (
+    projectPath: string,
+    projectName: string,
+    qaProjectId?: string,
+  ) => void;
   onOpenSettings: () => void;
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenQa: () => void;
-  qaProjects?: Array<{ id: string; key: string; name: string; repo_path?: string }>;
-  onOpenQaProject?: (projectId: string) => void;
+  projects?: ChatProjectDescriptor[];
   onOpenAutomations: () => void;
   onOpenChannels: () => void;
   onSettingsIntent?: () => void;
@@ -298,10 +301,6 @@ export function Sidebar(props: SidebarProps) {
         {!collapsed && (
           <>
           <DispatchRail activeKey={props.activeKey} homeActive={props.newChatActive} />
-          <SidebarQaProjects
-            projects={props.qaProjects ?? []}
-            onOpen={(projectId) => props.onOpenQaProject?.(projectId)}
-          />
           <ChatList
             sessions={sessions}
             temporarySessions={temporarySessions}
@@ -330,6 +329,7 @@ export function Sidebar(props: SidebarProps) {
             onToggleGroup={props.onToggleGroup}
             onRequestRenameProject={props.onRequestRenameProject}
             onNewChatInProject={props.onNewChatInProject}
+            projects={props.projects}
             pinnedKeys={props.pinnedKeys}
             archivedKeys={props.archivedKeys}
             pinnedPaneKeys={props.pinnedPaneKeys}
