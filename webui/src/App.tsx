@@ -1780,6 +1780,47 @@ function Shell({
     return list;
   }, [getToken]);
 
+  useEffect(() => {
+    void loadQaProjects().catch(() => {});
+  }, [loadQaProjects]);
+
+  const openQaProjectChat = useCallback(
+    async (projectId: string) => {
+      const project = qaProjectsRef.current?.find((item) => item.id === projectId);
+      if (!project) return;
+      const repoPath = project.repo_path;
+      const scope: WorkspaceScopePayload | null = repoPath
+        ? {
+            project_path: repoPath,
+            access_mode: activeWorkspaceScope?.access_mode ?? "full",
+          }
+        : activeWorkspaceScope;
+      try {
+        const chatId = await createChat(scope);
+        client.setQaProject(chatId, projectId);
+        if (repoPath) {
+          const overrideScope: WorkspaceScopePayload = {
+            project_path: repoPath,
+            access_mode: activeWorkspaceScope?.access_mode ?? "full",
+          };
+          setWorkspaceOverrides((current) => ({
+            ...current,
+            [chatId]: normalizeWorkspaceScope(overrideScope),
+          }));
+        }
+        navigate({
+          view: "chat",
+          activeKey: `websocket:${chatId}`,
+          settingsSection: "overview",
+        });
+        setMobileSidebarOpen(false);
+      } catch (error) {
+        console.error("Failed to open QA project chat", error);
+      }
+    },
+    [activeWorkspaceScope, client, createChat, navigate],
+  );
+
   const applyQaProject = useCallback(
     (projectId: string | null) => {
       const project = projectId
@@ -2916,6 +2957,8 @@ function Shell({
     onOpenChannels,
     onOpenSkills,
     onOpenQa,
+    qaProjects: qaProjects ?? undefined,
+    onOpenQaProject: openQaProjectChat,
     onSettingsIntent,
     onOpenSearch: onOpenSessionSearch,
     activeUtility: !managingConnections && (view === "apps" || view === "automations" || view === "skills" || view === "channels" || view === "qa") ? view : null,

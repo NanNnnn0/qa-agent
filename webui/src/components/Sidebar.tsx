@@ -24,6 +24,7 @@ import {
   type SidebarDeleteItem,
   type SidebarPaneGroup,
 } from "@/components/ChatList";
+import { SidebarQaProjects } from "@/components/SidebarQaProjects";
 import { DispatchRail } from "@/components/dispatch/DispatchRail";
 import { useDispatchDesk } from "@/components/dispatch/dispatch-desk-context";
 import { HostSwitcher } from "@/components/remote/HostSwitcher";
@@ -72,6 +73,8 @@ interface SidebarProps {
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenQa: () => void;
+  qaProjects?: Array<{ id: string; key: string; name: string; repo_path?: string }>;
+  onOpenQaProject?: (projectId: string) => void;
   onOpenAutomations: () => void;
   onOpenChannels: () => void;
   onSettingsIntent?: () => void;
@@ -295,6 +298,10 @@ export function Sidebar(props: SidebarProps) {
         {!collapsed && (
           <>
           <DispatchRail activeKey={props.activeKey} homeActive={props.newChatActive} />
+          <SidebarQaProjects
+            projects={props.qaProjects ?? []}
+            onOpen={(projectId) => props.onOpenQaProject?.(projectId)}
+          />
           <ChatList
             sessions={sessions}
             temporarySessions={temporarySessions}
