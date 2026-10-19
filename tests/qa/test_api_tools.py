@@ -238,12 +238,37 @@ async def test_run_tool_preflight_start_and_get(
     assert checked["ready_count"] == 1
     assert checked["blockers"] == []
 
-    started = await _call(tool, action="start", project_id=project["id"], name="smoke")
+    started = await _call(
+        tool, action="start", project_id=project["id"], name="smoke", wait=True,
+    )
     assert started["run"]["status"] == "passed"
     assert started["run"]["template_version"] == "1"
     fetched = await _call(tool, action="get", run_id=started["run"]["id"])
     assert fetched["run"]["id"] == started["run"]["id"]
     assert fetched["run"]["failed_tests"] == []
+
+
+async def test_run_tool_starts_in_background(
+    store: QaStore, project: dict, demo_api: str,
+) -> None:
+    store.update_project(project["id"], base_url=demo_api)
+    store.create_case(
+        project["id"],
+        title="product list",
+        kind="api",
+        status="ready",
+        api={
+            "request": {"method": "GET", "path": "/api/products"},
+            "assertions": [{"type": "status", "expect": 200}],
+        },
+    )
+    tool = QaApiRunTool(store)
+    started = await _call(tool, action="start", project_id=project["id"])
+    assert started["run"]["status"] == "running"
+    settled = await _call(
+        tool, action="get", run_id=started["run"]["id"], wait=True, timeout_s=60,
+    )
+    assert settled["run"]["status"] == "passed"
 
 
 async def test_run_tool_reports_blockers(store: QaStore, project: dict) -> None:

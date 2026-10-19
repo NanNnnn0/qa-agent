@@ -226,7 +226,7 @@ async def test_run_tool_accepts_a_plan(store: QaStore, project: dict, demo_api: 
     assert checked["phases"] == {"setup": 1, "cases": 0, "cleanup": 1}
 
     started = json.loads(await tool.execute(
-        action="start", project_id=project["id"],
+        action="start", project_id=project["id"], wait=True,
         plan=plan(setup=[setup["id"]], cleanup=[cleanup["id"]]),
     ))
     assert started["run"]["status"] == "passed"

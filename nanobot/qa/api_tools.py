@@ -396,8 +396,8 @@ class QaApiRunTool(_QaApiTool):
         "Pinned API runs. preflight reports every blocker (case not ready, no request, no "
         "assertions, unresolved variable, stale catalog reference, auth config) without sending "
         "a request; start runs the selected ready cases through the fixed pytest template, pins "
-        "their revisions, batches more than 200 cases and masks credentials, then returns the "
-        "finished run; get returns one run summary with its failed tests."
+        "their revisions, batches more than 200 cases and masks credentials, and returns a "
+        "running run unless wait is true; get returns one run summary with its failed tests."
     )
     parameters = {
         "type": "object",
@@ -453,6 +453,17 @@ class QaApiRunTool(_QaApiTool):
                 "type": "string",
                 "description": "Run id (run_...), required by get.",
             },
+            "wait": {
+                "type": "boolean",
+                "description": (
+                    "Block until the run finishes instead of returning a running run "
+                    "(default false). On get, wait for a running run to settle."
+                ),
+            },
+            "timeout_s": {
+                "type": "number",
+                "description": "Seconds to wait when wait is true (default 300).",
+            },
         },
         "required": ["action"],
         "additionalProperties": False,
@@ -477,7 +488,12 @@ class QaApiRunTool(_QaApiTool):
             project_id = _text(kwargs.get("project_id"), "project_id")
             if not project_id:
                 raise QaValidationError("project_id is required")
-            run = execution.execute_pinned(
+            starter = (
+                execution.execute_pinned
+                if bool(kwargs.get("wait"))
+                else execution.execute_pinned_async
+            )
+            run = starter(
                 store,
                 project_id,
                 case_ids=self._case_ids(kwargs),
@@ -493,7 +509,15 @@ class QaApiRunTool(_QaApiTool):
             run_id = _text(kwargs.get("run_id"), "run_id")
             if not run_id:
                 raise QaValidationError("run_id is required")
-            return {"action": "get", "run": execution.run_summary(store.get_run(run_id))}
+            if bool(kwargs.get("wait")):
+                run = execution.wait_for_run(
+                    store,
+                    run_id,
+                    timeout_s=float(kwargs.get("timeout_s") or 300),
+                )
+            else:
+                run = store.get_run(run_id)
+            return {"action": "get", "run": execution.run_summary(run)}
         raise QaValidationError(f"action must be one of {', '.join(RUN_ACTIONS)}")
 
     def _case_ids(self, kwargs: dict[str, Any]) -> list[str] | None:

@@ -27,6 +27,7 @@ from typing import Any
 import nanobot
 from nanobot.qa.auth import AuthProvider, mask_payload, mask_text
 from nanobot.qa.runner import looks_like_environment_error, placeholders
+from nanobot.qa.scheduler import shared_scheduler
 from nanobot.qa.store import QaStore
 from nanobot.qa.validation import (
     QaError,
@@ -339,7 +340,7 @@ def _plan_snapshot(
 # -- execution -------------------------------------------------------------
 
 
-def execute_pinned(
+def _prepare_run(
     store: QaStore,
     project_id: str,
     *,
@@ -350,9 +351,13 @@ def execute_pinned(
     name: str = "",
     environment: str = "",
     trigger: str = "agent",
-    batch_size: int = BATCH_SIZE,
 ) -> dict[str, Any]:
-    """Run ready cases through the fixed template and persist one run row."""
+    """Validate, snapshot and create the run row.
+
+    Authentication happens here so a bad login fails the start call instead of
+    surfacing later in a background thread. ``finished`` marks a prepared run
+    that already carries its final state.
+    """
     checked = preflight(
         store, project_id, case_ids=case_ids, kind=kind, auth=auth, plan=plan,
     )
@@ -399,7 +404,7 @@ def execute_pinned(
         report = mask_payload(
             _failure_report(provider.kind, str(exc), snapshot), provider.secrets()
         )
-        return store.finish_run(
+        finished = store.finish_run(
             run["id"],
             status="error",
             passed=0,
@@ -410,15 +415,41 @@ def execute_pinned(
             report=report,
             log="",
         )
+        return {"run": finished, "finished": True}
+    return {
+        "run": run,
+        "finished": False,
+        "store": store,
+        "base_url": base_url,
+        "phases": phases,
+        "variables": {
+            str(key): str(value)
+            for key, value in (project.get("default_env") or {}).items()
+        },
+        "headers": headers,
+        "secrets": provider.secrets(),
+        "snapshot": snapshot,
+        "plan_version": plan_version,
+        "auth_kind": provider.kind,
+    }
 
+
+def _execute_run(prepared: dict[str, Any], *, batch_size: int = BATCH_SIZE) -> dict[str, Any]:
+    """Execute a prepared run and finish its row."""
+    store: QaStore = prepared["store"]
+    run = prepared["run"]
+    phases = prepared["phases"]
+    base_url = prepared["base_url"]
+    headers = prepared["headers"]
+    secrets = prepared["secrets"]
+    variables = dict(prepared["variables"])
+    snapshot = prepared["snapshot"]
+    plan_version = prepared["plan_version"]
     started_ms = int(time.time() * 1000)
     started = time.perf_counter()
     tests: list[dict[str, Any]] = []
     batches: list[dict[str, Any]] = []
     logs: list[str] = []
-    variables = {
-        str(key): str(value) for key, value in (project.get("default_env") or {}).items()
-    }
     size = max(1, min(int(batch_size or BATCH_SIZE), MAX_CASES_PER_RUN))
     setup_failed = False
     for phase in PLAN_PHASES:
@@ -465,7 +496,7 @@ def execute_pinned(
         "template_version": TEMPLATE_VERSION,
         "plan_version": plan_version,
         "snapshot": snapshot,
-        "auth": {"kind": provider.kind},
+        "auth": {"kind": prepared.get("auth_kind", "none")},
         "batches": batches,
         "summary": summary,
         "tests": tests,
@@ -480,9 +511,99 @@ def execute_pinned(
         errors=summary["error"],
         skipped=summary["skipped"],
         duration_ms=duration_ms,
-        report=mask_payload(report_payload, provider.secrets()),
-        log=mask_text("\n".join(logs), provider.secrets()),
+        report=mask_payload(report_payload, secrets),
+        log=mask_text("\n".join(logs), secrets),
     )
+
+
+def execute_pinned(
+    store: QaStore,
+    project_id: str,
+    *,
+    case_ids: list[str] | None = None,
+    kind: str | None = None,
+    auth: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+    name: str = "",
+    environment: str = "",
+    trigger: str = "agent",
+    batch_size: int = BATCH_SIZE,
+) -> dict[str, Any]:
+    """Run ready cases now and return the finished run."""
+    prepared = _prepare_run(
+        store,
+        project_id,
+        case_ids=case_ids,
+        kind=kind,
+        auth=auth,
+        plan=plan,
+        name=name,
+        environment=environment,
+        trigger=trigger,
+    )
+    if prepared["finished"]:
+        return prepared["run"]
+    return _execute_run(prepared, batch_size=batch_size)
+
+
+def execute_pinned_async(
+    store: QaStore,
+    project_id: str,
+    *,
+    case_ids: list[str] | None = None,
+    kind: str | None = None,
+    auth: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+    name: str = "",
+    environment: str = "",
+    trigger: str = "agent",
+    batch_size: int = BATCH_SIZE,
+    scheduler: Any = None,
+) -> dict[str, Any]:
+    """Create the run and execute it on the project's queue.
+
+    Returns the ``running`` row. Preflight and authentication already passed, so
+    a caller that got a run id can poll it instead of waiting.
+    """
+    prepared = _prepare_run(
+        store,
+        project_id,
+        case_ids=case_ids,
+        kind=kind,
+        auth=auth,
+        plan=plan,
+        name=name,
+        environment=environment,
+        trigger=trigger,
+    )
+    if prepared["finished"]:
+        return prepared["run"]
+    runner = scheduler if scheduler is not None else shared_scheduler()
+    runner.submit(
+        project_id,
+        lambda: _execute_run(prepared, batch_size=batch_size),
+    )
+    return prepared["run"]
+
+
+def wait_for_run(
+    store: QaStore,
+    run_id: str,
+    *,
+    timeout_s: float = 300.0,
+    interval_s: float = 0.05,
+) -> dict[str, Any]:
+    """Block until a run leaves the ``running`` state."""
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    while True:
+        run = store.get_run(run_id)
+        if run["status"] != "running":
+            return run
+        if time.monotonic() >= deadline:
+            raise QaValidationError(
+                f"run '{run_id}' is still running after {timeout_s:.0f}s"
+            )
+        time.sleep(interval_s)
 
 
 def _run_batch(

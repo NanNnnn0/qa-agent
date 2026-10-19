@@ -21,7 +21,7 @@ The QA test row and the API asset layer were re-verified on 2026-10-19 in worktr
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 154 passed in 33.04s (2026-10-19, `feat/qa-api-testing`) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 160 passed in 37.42s (2026-10-19, `feat/qa-api-testing`) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
 | QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
@@ -40,6 +40,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 - MCP API asset tools: `qa_api_catalog` (ingest/list/get/diff), `qa_api_workflow` (create/get/validate/submit/apply/resume/export) and `qa_api_run` (preflight/start/get) in `nanobot/qa/api_tools.py`, registered in the stdio MCP server. Local OpenAPI files are only read under `NANOBOT_QA_SPEC_ROOTS`.
 - Pinned API runs: `nanobot/qa/execution.py` gates a run with preflight, executes ready cases through the fixed `nanobot/qa/templates/case_template.py` in a subprocess, pins each case revision in the run report, batches above 200 cases, masks credentials (bearer or JSON login, `env:NAME` references) and classifies every failure. `api.extract` plus `{{run.<name>}}` chains values between cases; a failed login persists a run with `classification: auth_failed`.
 - Ordered run plans: `plan={version, setup, cases, cleanup}` with `{case_id, revision?}` steps. Setup runs first, a failed setup step marks the cases phase `dependency_blocked`, cleanup always runs, and a cleanup failure is classified `cleanup_failed`. A pinned revision must match the case's current revision, and the run report records the plan with resolved revisions.
+- Background runs: `qa_api_run start` returns a `running` row and executes on `nanobot/qa/scheduler.py`, which serializes runs per project and lets different projects proceed in parallel. `get` polls; `wait=true` blocks. A gateway restart leaves a `running` row as evidence instead of rewriting it.
 - QA workbench: `webui/src/components/qa/` and `webui/src/lib/qa-api.ts` (71 TS/TSX files including the API client).
 - Tests: `tests/qa/` (15 files) and `webui/src/tests/qa-*.test.tsx`.
 - Docs: `docs/qa-agent.md`, `docs/design/qa-platform.md`, `docs/design/qa-webui-brief.md`, `docs/research/` (4 files), plus the inherited upstream pages under `docs/`.

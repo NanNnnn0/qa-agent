@@ -66,7 +66,7 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 先预检，再执行，不要跳过预检：
 
 - `qa_api_run action=preflight project_id=...`：返回阻塞项。常见阻塞是未 ready、缺 `api.request`、缺断言、变量缺失、引用的接口资料已 `missing`、项目没有 base_url、鉴权配置错误。有阻塞就修用例或资料。
-- `qa_api_run action=start project_id=... case_ids=[...] auth={...}`：走固定 pytest 模板执行。运行记录会固定每条用例的修订号和模板版本，之后改用例不会改变这次运行依据；超过 200 条自动分批，汇总覆盖全部选中范围。
+- `qa_api_run action=start project_id=... case_ids=[...] auth={...}`：走固定 pytest 模板执行。运行记录会固定每条用例的修订号和模板版本，之后改用例不会改变这次运行依据；超过 200 条自动分批，汇总覆盖全部选中范围。默认异步：返回 `status=running` 的 run，随后用 `qa_api_run action=get run_id=...` 轮询（或传 `wait=true` 直接等）；同一项目的运行会排队串行执行。
 - 有序计划：传 `plan` 对象，`{"version":"1","setup":[{"case_id":"...","revision":3}],"cases":[...],"cleanup":[...]}`。setup 先跑，setup 失败会跳过 cases（标记 dependency_blocked），cleanup 仍会执行；cleanup 失败单独记为 cleanup_failed。步骤里的 revision 必须等于用例当前修订，否则预检直接拦下。`plan` 与 `case_ids` 二选一。
 - `qa_api_run action=get run_id=...`：看结论和失败用例的分类。
 - 鉴权：`auth` 支持 `{"kind":"bearer","token":"env:QA_TOKEN"}` 和 `{"kind":"login","path":"/api/login","body":{"user":"env:QA_USER","password":"env:QA_PASS"},"token_path":"$.data.token"}`。凭证只存在于运行上下文，报告和日志已脱敏。

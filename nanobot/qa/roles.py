@@ -66,7 +66,7 @@ _TAIL_CONTRACT = """\
 - 项目：qa_project action=get|list
 - 接口资料：qa_api_catalog action=ingest|list|get|diff（先登记资料，再设计用例）
 - 用例批次：qa_api_workflow action=create|get|validate|submit|apply|resume|export
-- 执行：qa_api_run action=preflight|start|get（start 走固定模板，运行记录固定用例修订）；有序执行用 plan 参数：setup → cases → cleanup，每步写 case_id 与 revision
+- 执行：qa_api_run action=preflight|start|get（start 走固定模板，运行记录固定用例修订）；有序执行用 plan 参数：setup → cases → cleanup，每步写 case_id 与 revision；start 默认异步返回 running，用 get 轮询或传 wait=true，同项目运行串行
 - 用例：qa_case action=list|create|bulk_create|update|delete（bulk_create 单次最多 50 条）
 - 脚本：qa_script action=create|update|list|get
 - 执行：qa_run action=start（case_ids 或 script_id）|list|get
