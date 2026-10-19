@@ -95,10 +95,9 @@ class QaApiCatalogTool(_QaApiTool):
 
     name = "qa_api_catalog"
     description = (
-        "API reference catalog for one project. ingest parses an OpenAPI 3.0/3.1 document "
-        "(JSON or YAML) into operations and reports added, changed and missing entries; "
-        "diff reports the same comparison without writing; list pages through operations; "
-        "get returns one operation with its normalized spec and evidence pointers."
+        "API reference catalog: ingest or diff an OpenAPI 3.0/3.1 document (JSON or YAML) "
+        "and report added, changed and missing operations; list or get one operation with "
+        "its normalized spec and evidence pointers."
     )
     parameters = {
         "type": "object",
@@ -110,55 +109,55 @@ class QaApiCatalogTool(_QaApiTool):
             },
             "project_id": {
                 "type": "string",
-                "description": "Project id (proj_...); required by ingest and diff.",
+                "description": "proj_... (ingest, diff)",
             },
             "operation_id": {
                 "type": "string",
-                "description": "Catalog operation id (op_...), required by get.",
+                "description": "op_... (get)",
             },
             "document": {
                 "type": "string",
-                "description": "OpenAPI document as JSON or YAML text, for ingest and diff.",
+                "description": "OpenAPI JSON or YAML text.",
             },
             "source_path": {
                 "type": "string",
                 "description": (
-                    "Local OpenAPI file inside NANOBOT_QA_SPEC_ROOTS; alternative to document."
+                    "OpenAPI file under NANOBOT_QA_SPEC_ROOTS."
                 ),
             },
             "source_kind": {
                 "type": "string",
                 "enum": list(EVIDENCE_KINDS),
-                "description": "Evidence kind recorded for an inline document (default spec).",
+                "description": "Evidence kind (default spec).",
             },
             "source_ref": {
                 "type": "string",
-                "description": "Evidence reference for an inline document, e.g. a commit or URL.",
+                "description": "Evidence ref (commit, URL).",
             },
             "source_version": {
                 "type": "string",
-                "description": "Material version recorded with the operations.",
+                "description": "Material version.",
             },
             "query": {
                 "type": "string",
-                "description": "Filter by path, summary or operationId.",
+                "description": "Match path, summary or operationId.",
             },
             "method": {
                 "type": "string",
-                "description": "Filter by HTTP method, for list.",
+                "description": "HTTP method filter.",
             },
             "status": {
                 "type": "string",
                 "enum": ["active", "missing"],
-                "description": "Filter by catalog status, for list.",
+                "description": "active | missing",
             },
             "limit": {
                 "type": "integer",
-                "description": f"Page size for list (default {_LIST_DEFAULT}, max {_LIST_MAX}).",
+                "description": f"Page size (default {_LIST_DEFAULT}, max {_LIST_MAX}).",
             },
             "offset": {
                 "type": "integer",
-                "description": "Page offset for list.",
+                "description": "Page offset.",
             },
         },
         "required": ["action"],
@@ -240,11 +239,9 @@ class QaApiWorkflowTool(_QaApiTool):
 
     name = "qa_api_workflow"
     description = (
-        "Staged batch of API cases for one project. create stages candidates and returns a "
-        "workflow id; validate reports what apply would create or update without writing; "
-        "submit replaces the candidates of a failed batch; apply writes cases, catalog links "
-        "and revisions in one transaction; resume reports the checkpoint and errors; export "
-        "returns the batch plus its case revisions as a version snapshot for Git."
+        "Staged API case batch: create, validate, submit, apply, resume or export. apply "
+        "writes cases, catalog links and revisions in one transaction; export returns the "
+        "batch plus its case revisions as a snapshot for Git."
     )
     parameters = {
         "type": "object",
@@ -256,23 +253,23 @@ class QaApiWorkflowTool(_QaApiTool):
             },
             "workflow_id": {
                 "type": "string",
-                "description": "Workflow id (wf_...); required by every action except create.",
+                "description": "wf_... (all but create)",
             },
             "project_id": {
                 "type": "string",
-                "description": "Project id (proj_...); required by create.",
+                "description": "proj_... (create)",
             },
             "candidates": {
                 "type": "array",
                 "items": {"type": "object"},
                 "description": (
-                    "Candidate list. Each item is {case, operation?, scenario_key?, evidence?, "
-                    "base_revision?}; case is the structured case body."
+                    "Items {case, operation?, scenario_key?, evidence?, base_revision?}; "
+                    "case is the structured case body."
                 ),
             },
             "idempotency_key": {
                 "type": "string",
-                "description": "Repeating the same key returns the same workflow.",
+                "description": "Same key returns the same workflow.",
             },
             "kind": {
                 "type": "string",
@@ -280,7 +277,7 @@ class QaApiWorkflowTool(_QaApiTool):
             },
             "base": {
                 "type": "object",
-                "description": "Free-form base marker, e.g. the catalog source version.",
+                "description": "Base marker, e.g. catalog source version.",
             },
         },
         "required": ["action"],
@@ -409,60 +406,55 @@ class QaApiRunTool(_QaApiTool):
             },
             "project_id": {
                 "type": "string",
-                "description": "Project id (proj_...); required by preflight and start.",
+                "description": "proj_... (preflight, start)",
             },
             "case_ids": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Explicit case ids in run order; omit to run every case of the project "
-                    "matching kind. Not allowed together with plan."
+                    "Explicit case ids in run order; omit to select by kind. Not with plan."
                 ),
             },
             "plan": {
                 "type": "object",
                 "description": (
-                    "Ordered plan: {version, setup, cases, cleanup}; each step is "
-                    "{case_id, revision?}. Setup runs first, then cases, then cleanup; a "
-                    "failed setup step skips the cases phase while cleanup still runs. "
-                    "A pinned revision must match the case's current revision."
+                    "Ordered {version, setup, cases, cleanup}; steps are {case_id, revision?}. "
+                    "A pinned revision must match the current revision."
                 ),
             },
             "kind": {
                 "type": "string",
                 "enum": ["api", "ui", "manual"],
-                "description": "Restrict the implicit selection by case kind.",
+                "description": "Restrict the implicit selection.",
             },
             "auth": {
                 "type": "object",
                 "description": (
-                    "Auth config: {kind: none|bearer|login, token, path, body, token_path, "
-                    "header, prefix}. Values may be env:NAME references; credentials are "
-                    "never persisted."
+                    "{kind: none|bearer|login, token, path, body, token_path, header, prefix}; "
+                    "env:NAME allowed, credentials are never persisted."
                 ),
             },
             "name": {
                 "type": "string",
-                "description": "Run name shown in the workbench.",
+                "description": "Run name.",
             },
             "environment": {
                 "type": "string",
-                "description": "Environment label recorded with the run.",
+                "description": "Environment label.",
             },
             "run_id": {
                 "type": "string",
-                "description": "Run id (run_...), required by get.",
+                "description": "run_... (get)",
             },
             "wait": {
                 "type": "boolean",
                 "description": (
-                    "Block until the run finishes instead of returning a running run "
-                    "(default false). On get, wait for a running run to settle."
+                    "Block until the run settles (default false)."
                 ),
             },
             "timeout_s": {
                 "type": "number",
-                "description": "Seconds to wait when wait is true (default 300).",
+                "description": "Seconds to wait with wait (default 300).",
             },
         },
         "required": ["action"],

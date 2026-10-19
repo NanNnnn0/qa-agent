@@ -64,7 +64,10 @@ async def qa_project_context(ctx: Any) -> RuntimeContextBlock | None:
     label = binding["key"] or binding["id"]
     lines = [
         f"This chat is bound to QA project {label} ({binding['id']}).",
-        "Functional and API cases must be created through the qa_case tool: the QA case library "
+        "API cases come from the reference catalog: register endpoints with qa_api_catalog, stage "
+        "candidates with qa_api_workflow (evidence, scenario keys, revisions), apply, then "
+        "preflight and run with qa_api_run. Do not write API cases ad hoc.",
+        "Functional and UI cases must be created through the qa_case tool: the QA case library "
         "(YAML under the project root) is the source of truth. Do not only write test files into "
         "the repository.",
         "Automation scripts must be registered with qa_script (file_path inside the project repo) "
