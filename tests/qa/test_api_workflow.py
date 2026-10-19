@@ -66,6 +66,22 @@ def test_apply_creates_a_linked_case(store: QaStore, project: dict) -> None:
     assert revisions["items"][0]["change_source"] == "workflow"
 
 
+def test_generated_codes_are_unique_within_a_batch(
+    store: QaStore, project: dict,
+) -> None:
+    store.ingest_api_operations(project["id"], catalog.parse_openapi(SPEC))
+    candidates = []
+    for scenario in ("create-success", "create-duplicate", "create-invalid"):
+        item = candidate(scenario=scenario)
+        item["case"]["title"] = f"create an order ({scenario})"
+        candidates.append(item)
+    workflow = store.create_api_workflow(project["id"], candidates=candidates)
+    applied = store.apply_api_workflow(workflow["id"])
+    codes = [entry["code"] for entry in applied["checkpoint"]["applied"]]
+    assert codes == ["SHOP-API-001", "SHOP-API-002", "SHOP-API-003"]
+    assert store.list_cases(project_id=project["id"])["total"] == 3
+
+
 def test_reapplying_an_applied_batch_is_a_noop(store: QaStore, project: dict) -> None:
     store.ingest_api_operations(project["id"], catalog.parse_openapi(SPEC))
     workflow = store.create_api_workflow(project["id"], candidates=[candidate()])

@@ -650,7 +650,9 @@ class QaStore:
 
     # -- cases -------------------------------------------------------------
 
-    def _next_case_code(self, project_key: str, kind: str) -> str:
+    def _next_case_code(
+        self, project_key: str, kind: str, reserved: set[str] | None = None,
+    ) -> str:
         prefix = f"{project_key.upper()}-{kind.upper()}-"
         rows = self._fetchall(
             "SELECT code FROM cases WHERE code LIKE ? ORDER BY code", (f"{prefix}%",)
@@ -660,7 +662,10 @@ class QaStore:
             suffix = row["code"][len(prefix):]
             if suffix.isdigit():
                 highest = max(highest, int(suffix))
-        return f"{prefix}{highest + 1:03d}"
+        number = highest + 1
+        while reserved and f"{prefix}{number:03d}" in reserved:
+            number += 1
+        return f"{prefix}{number:03d}"
 
     def create_case(
         self,
@@ -717,6 +722,7 @@ class QaStore:
         source: str,
         author: str,
         exclude_case_id: str | None = None,
+        reserved: set[str] | None = None,
     ) -> dict[str, Any]:
         """Validate and normalize one case row without touching the database."""
         case_kind = require_enum(kind, "kind", CASE_KINDS, default="api")
@@ -726,7 +732,7 @@ class QaStore:
             "project_id": project["id"],
             "code": self._resolve_case_code(
                 project["key"], project["id"], case_kind, code,
-                exclude_case_id=exclude_case_id,
+                exclude_case_id=exclude_case_id, reserved=reserved,
             ),
             "title": require_text(title, "title", max_length=300),
             "kind": case_kind,
@@ -793,15 +799,17 @@ class QaStore:
 
     def _resolve_case_code(
         self, project_key: str, project_id: str, kind: str, code: Any,
-        *, exclude_case_id: str | None = None,
+        *, exclude_case_id: str | None = None, reserved: set[str] | None = None,
     ) -> str:
         if code is None or code == "":
-            return self._next_case_code(project_key, kind)
+            return self._next_case_code(project_key, kind, reserved)
         if not isinstance(code, str):
             raise QaValidationError("code must be a string")
         normalized = code.strip().upper()
         if not normalized:
-            return self._next_case_code(project_key, kind)
+            return self._next_case_code(project_key, kind, reserved)
+        if reserved and normalized in reserved:
+            raise QaConflictError(f"case code '{normalized}' is used twice in this batch")
         clash = self._fetchone(
             "SELECT id FROM cases WHERE project_id = ? AND code = ? AND id != ?",
             (project_id, normalized, exclude_case_id or ""),
@@ -2051,12 +2059,14 @@ class QaStore:
         project = self._require_project(workflow["project_id"])
         prepared: list[dict[str, Any]] = []
         errors: list[str] = []
+        reserved: set[str] = set()
         for index, candidate in enumerate(workflow["candidates"]):
             try:
-                item = self._prepare_candidate(project, candidate)
+                item = self._prepare_candidate(project, candidate, reserved=reserved)
             except QaError as exc:
                 errors.append(f"candidates[{index}]: {exc}")
                 continue
+            reserved.add(item["row"]["code"])
             operation = item["operation"]
             prepared.append({
                 "index": index,
@@ -2101,10 +2111,12 @@ class QaStore:
             return workflow
         project = self._require_project(workflow["project_id"])
         try:
-            prepared = [
-                self._prepare_candidate(project, candidate)
-                for candidate in workflow["candidates"]
-            ]
+            prepared: list[dict[str, Any]] = []
+            reserved: set[str] = set()
+            for candidate in workflow["candidates"]:
+                item = self._prepare_candidate(project, candidate, reserved=reserved)
+                reserved.add(item["row"]["code"])
+                prepared.append(item)
         except Exception as exc:
             self._fail_workflow(workflow_id, {"errors": [str(exc)]})
             raise
@@ -2189,7 +2201,11 @@ class QaStore:
         return self.get_api_workflow(workflow_id)
 
     def _prepare_candidate(
-        self, project: dict[str, Any], candidate: dict[str, Any],
+        self,
+        project: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        reserved: set[str] | None = None,
     ) -> dict[str, Any]:
         operation = self._find_api_operation(project["id"], candidate["operation"])
         payload = candidate["case"]
@@ -2220,6 +2236,7 @@ class QaStore:
             source=payload.get("source", "ai"),
             author=payload.get("author", ""),
             exclude_case_id=existing_case_id,
+            reserved=reserved,
         )
         return {
             "row": row,
