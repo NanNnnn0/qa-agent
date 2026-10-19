@@ -7,6 +7,7 @@ import { usePageVisibility } from "@/hooks/usePageVisibility";
 import { loadQaProjects, type QaMutationTransport } from "@/lib/qa-api";
 import { cn } from "@/lib/utils";
 
+import { QaApiAssets } from "./QaApiAssets";
 import { QaCaseLibrary } from "./QaCaseLibrary";
 import { QaOverview } from "./QaOverview";
 import { QaRuns } from "./QaRuns";
@@ -21,6 +22,7 @@ export type QaTab =
   | "overview"
   | "tasks"
   | "cases"
+  | "assets"
   | "scripts"
   | "schedules"
   | "runs"
@@ -30,6 +32,7 @@ const QA_TABS: QaTab[] = [
   "overview",
   "tasks",
   "cases",
+  "assets",
   "scripts",
   "schedules",
   "runs",
@@ -82,6 +85,7 @@ export function QaWorkbench({
     overview: tx("qa.tabs.overview", "概览"),
     tasks: tx("qa.tabs.tasks", "任务板"),
     cases: tx("qa.tabs.cases", "用例库"),
+    assets: tx("qa.tabs.assets", "接口资产"),
     scripts: tx("qa.tabs.scripts", "自动化"),
     schedules: tx("qa.tabs.schedules", "定时任务"),
     runs: tx("qa.tabs.runs", "运行记录"),
@@ -223,6 +227,13 @@ export function QaWorkbench({
                 initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 onChanged={refresh}
+              />
+            ) : null}
+            {tab === "assets" ? (
+              <QaApiAssets
+                token={token}
+                projects={projects}
+                refreshSignal={refreshSignal}
               />
             ) : null}
             {tab === "scripts" ? (

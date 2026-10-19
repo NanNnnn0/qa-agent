@@ -155,11 +155,61 @@ export interface QaRunTest {
   message: string;
   duration: number | null;
   checks: unknown[];
+  /** setup | cases | cleanup when the run used an ordered plan. */
+  phase: string;
+  /** assertion_failed | config_error | env_blocked | cleanup_failed | dependency_blocked. */
+  classification: string;
+}
+
+export interface QaRunPhaseSummary {
+  tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  error: number;
+}
+
+export interface QaRunSummary {
+  tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  error: number;
+  duration: number;
+  batches?: number;
+  phases?: Record<string, QaRunPhaseSummary>;
+}
+
+export interface QaRunBatch {
+  index: number;
+  phase?: string;
+  cases: number;
+  reported: number;
+  exit_code: number;
+  duration_ms: number;
+}
+
+export interface QaRunSnapshotCase {
+  case_id: string;
+  code: string;
+  revision: number;
+  content_hash: string;
+}
+
+export interface QaRunSnapshot {
+  template_version: string;
+  cases: QaRunSnapshotCase[];
+  plan?: { version: string; phases: Record<string, { case_id: string; revision: number }[]> };
 }
 
 export interface QaRunReport {
-  summary: string;
+  /** Legacy runs store prose; pinned runs store the structured summary. */
+  summary: string | QaRunSummary | null;
   tests: QaRunTest[];
+  template_version: string;
+  plan_version: string;
+  batches: QaRunBatch[];
+  snapshot: QaRunSnapshot | null;
 }
 
 export interface QaRun {
@@ -472,7 +522,66 @@ function normalizeRunTest(value: unknown): QaRunTest {
     message: text(row.message),
     duration: row.duration === undefined || row.duration === null ? null : number(row.duration),
     checks: Array.isArray(row.checks) ? row.checks : [],
+    phase: text(row.phase),
+    classification: text(row.classification),
   };
+}
+
+function normalizeRunSummary(value: unknown): QaRunSummary | null {
+  if (!isRecord(value)) return null;
+  const phases = isRecord(value.phases) ? value.phases : null;
+  const normalizedPhases: Record<string, QaRunPhaseSummary> = {};
+  if (phases) {
+    for (const [name, phase] of Object.entries(phases)) {
+      if (!isRecord(phase)) continue;
+      normalizedPhases[name] = {
+        tests: integer(phase.tests, 0),
+        passed: integer(phase.passed, 0),
+        failed: integer(phase.failed, 0),
+        skipped: integer(phase.skipped, 0),
+        error: integer(phase.error, 0),
+      };
+    }
+  }
+  return {
+    tests: integer(value.tests, 0),
+    passed: integer(value.passed, 0),
+    failed: integer(value.failed, 0),
+    skipped: integer(value.skipped, 0),
+    error: integer(value.error, 0),
+    duration: integer(value.duration, 0),
+    batches: value.batches === undefined ? undefined : integer(value.batches, 0),
+    phases: Object.keys(normalizedPhases).length > 0 ? normalizedPhases : undefined,
+  };
+}
+
+function normalizeRunSnapshot(value: unknown): QaRunSnapshot | null {
+  if (!isRecord(value)) return null;
+  const cases = Array.isArray(value.cases)
+    ? value.cases.filter(isRecord).map((row) => ({
+        case_id: text(row.case_id),
+        code: text(row.code),
+        revision: integer(row.revision, 0),
+        content_hash: text(row.content_hash),
+      }))
+    : [];
+  const plan = isRecord(value.plan) && isRecord(value.plan.phases)
+    ? {
+        version: text(value.plan.version),
+        phases: Object.fromEntries(
+          Object.entries(value.plan.phases)
+            .filter(([, steps]) => Array.isArray(steps))
+            .map(([name, steps]) => [
+              name,
+              (steps as unknown[]).filter(isRecord).map((step) => ({
+                case_id: text(step.case_id),
+                revision: integer(step.revision, 0),
+              })),
+            ]),
+        ),
+      }
+    : undefined;
+  return { template_version: text(value.template_version), cases, plan };
 }
 
 function normalizeRun(value: unknown): QaRun {
@@ -481,8 +590,23 @@ function normalizeRun(value: unknown): QaRun {
   const trigger = text(row.trigger);
   const report = isRecord(row.report)
     ? {
-        summary: text(row.report.summary),
+        summary: isRecord(row.report.summary)
+          ? normalizeRunSummary(row.report.summary)
+          : text(row.report.summary) || null,
         tests: Array.isArray(row.report.tests) ? row.report.tests.map(normalizeRunTest) : [],
+        template_version: text(row.report.template_version),
+        plan_version: text(row.report.plan_version),
+        batches: Array.isArray(row.report.batches)
+          ? row.report.batches.filter(isRecord).map((batch) => ({
+              index: integer(batch.index, 0),
+              phase: text(batch.phase),
+              cases: integer(batch.cases, 0),
+              reported: integer(batch.reported, 0),
+              exit_code: integer(batch.exit_code, 0),
+              duration_ms: integer(batch.duration_ms, 0),
+            }))
+          : [],
+        snapshot: normalizeRunSnapshot(row.report.snapshot),
       }
     : null;
   return {
@@ -2396,4 +2520,173 @@ export async function rejectQaTraceReview(
     compactPayload({ ...input }),
   );
   return readEntity(payload, "review", normalizeTraceReviewOutcome);
+}
+
+// -- API reference assets and case revisions -------------------------------
+
+export interface QaApiOperationEvidence {
+  kind: string;
+  ref: string;
+  version?: string;
+}
+
+export interface QaApiOperation {
+  id: string;
+  project_id: string;
+  method: string;
+  path: string;
+  path_template: string;
+  operation_id: string;
+  summary: string;
+  status: "active" | "missing";
+  source_kind: string;
+  source_ref: string;
+  source_version: string;
+  created_at: string;
+  updated_at: string;
+  spec?: RawRecord;
+  evidence?: QaApiOperationEvidence[];
+}
+
+export interface QaApiOperationList {
+  items: QaApiOperation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface QaApiOperationQuery {
+  projectId?: string;
+  query?: string;
+  method?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+function normalizeOperation(value: unknown): QaApiOperation {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    project_id: text(row.project_id),
+    method: text(row.method).toUpperCase(),
+    path: text(row.path),
+    path_template: text(row.path_template) || text(row.path),
+    operation_id: text(row.operation_id),
+    summary: text(row.summary),
+    status: text(row.status) === "missing" ? "missing" : "active",
+    source_kind: text(row.source_kind),
+    source_ref: text(row.source_ref),
+    source_version: text(row.source_version),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+    spec: isRecord(row.spec) ? row.spec : undefined,
+    evidence: Array.isArray(row.evidence)
+      ? row.evidence.filter(isRecord).map((item) => ({
+          kind: text(item.kind),
+          ref: text(item.ref),
+          version: text(item.version) || undefined,
+        }))
+      : undefined,
+  };
+}
+
+export async function loadQaApiOperations(
+  token: string,
+  query: QaApiOperationQuery = {},
+): Promise<QaApiOperationList> {
+  const payload = await request<RawRecord>(
+    `/api/qa/api-operations${qaQuery({
+      project_id: query.projectId,
+      q: query.query,
+      method: query.method,
+      status: query.status,
+      limit: query.limit,
+      offset: query.offset,
+    })}`,
+    token,
+  );
+  const items = Array.isArray(payload.items) ? payload.items.map(normalizeOperation) : [];
+  return {
+    items,
+    total: integer(payload.total, items.length),
+    limit: integer(payload.limit, items.length),
+    offset: integer(payload.offset, 0),
+  };
+}
+
+export async function loadQaApiOperation(
+  token: string,
+  operationId: string,
+): Promise<QaApiOperation> {
+  const payload = await request<RawRecord>(
+    `/api/qa/api-operations/${encodeURIComponent(operationId)}`,
+    token,
+  );
+  return normalizeOperation(payload.operation);
+}
+
+export interface QaCaseRevision {
+  id: string;
+  case_id: string;
+  revision: number;
+  content_hash: string;
+  change_source: string;
+  changed_by: string;
+  created_at: string;
+  snapshot?: RawRecord;
+}
+
+export interface QaCaseRevisionList {
+  items: QaCaseRevision[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+function normalizeRevision(value: unknown): QaCaseRevision {
+  const row = isRecord(value) ? value : {};
+  return {
+    id: text(row.id),
+    case_id: text(row.case_id),
+    revision: integer(row.revision, 0),
+    content_hash: text(row.content_hash),
+    change_source: text(row.change_source),
+    changed_by: text(row.changed_by),
+    created_at: text(row.created_at),
+    snapshot: isRecord(row.snapshot) ? row.snapshot : undefined,
+  };
+}
+
+export async function loadQaCaseRevisions(
+  token: string,
+  caseId: string,
+  query: { limit?: number; offset?: number } = {},
+): Promise<QaCaseRevisionList> {
+  const payload = await request<RawRecord>(
+    `/api/qa/cases/${encodeURIComponent(caseId)}/revisions${qaQuery({
+      limit: query.limit,
+      offset: query.offset,
+    })}`,
+    token,
+  );
+  const items = Array.isArray(payload.items) ? payload.items.map(normalizeRevision) : [];
+  return {
+    items,
+    total: integer(payload.total, items.length),
+    limit: integer(payload.limit, items.length),
+    offset: integer(payload.offset, 0),
+  };
+}
+
+export async function loadQaCaseRevision(
+  token: string,
+  caseId: string,
+  revision: number,
+): Promise<QaCaseRevision> {
+  const payload = await request<RawRecord>(
+    `/api/qa/cases/${encodeURIComponent(caseId)}/revisions/${revision}`,
+    token,
+  );
+  return normalizeRevision(payload.revision);
 }

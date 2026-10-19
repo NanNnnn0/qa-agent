@@ -221,6 +221,32 @@ class QaApi:
                 limit=_int_query(query, "limit", 100),
                 offset=_int_query(query, "offset", 0),
             ))
+        if path.startswith(f"{QA_PREFIX}/cases/") and "/revisions" in path:
+            rest = path[len(QA_PREFIX) + len("/cases/"):]
+            case_id, _, revision = rest.partition("/revisions")
+            revision = revision.strip("/")
+            if revision:
+                try:
+                    number = int(revision)
+                except ValueError as exc:
+                    raise QaValidationError("revision must be an integer") from exc
+                return _ok({"revision": store.get_case_revision(case_id, number)})
+            return _ok(store.list_case_revisions(
+                case_id,
+                limit=_int_query(query, "limit", 50),
+                offset=_int_query(query, "offset", 0),
+            ))
+        if path == f"{QA_PREFIX}/api-operations":
+            return _ok(store.list_api_operations(
+                _query_first(query, "project_id") or None,
+                query=_query_first(query, "q") or None,
+                method=_query_first(query, "method") or None,
+                status=_query_first(query, "status") or None,
+                limit=_int_query(query, "limit", 10),
+                offset=_int_query(query, "offset", 0),
+            ))
+        if path.startswith(f"{QA_PREFIX}/api-operations/"):
+            return _ok({"operation": store.get_api_operation(path.rsplit("/", 1)[-1])})
         if path.startswith(f"{QA_PREFIX}/cases/"):
             return _ok({"case": self._cases().get_case(path.rsplit("/", 1)[-1])})
         if path == f"{QA_PREFIX}/scripts":

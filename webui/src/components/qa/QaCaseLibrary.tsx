@@ -19,6 +19,7 @@ import {
   importQaCases,
   loadQaCase,
   loadQaCaseExport,
+  loadQaCaseRevisions,
   loadQaCases,
   markQaCaseReviewed,
   qaErrorMessage,
@@ -497,6 +498,11 @@ function QaCaseDrawer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [savedAt, setSavedAt] = useState("");
+  const revisions = useQaQuery(
+    () => (caseId ? loadQaCaseRevisions(token, caseId, { limit: 20 }) : Promise.resolve(null)),
+    [token, caseId, savedAt],
+    { enabled: open && Boolean(caseId), intervalMs: 0 },
+  );
 
   const loadedId = current?.id ?? "";
   useEffect(() => {
@@ -765,6 +771,48 @@ function QaCaseDrawer({
               className="font-mono text-[12px] leading-5"
               disabled={busy}
             />
+          </QaDetailSection>
+
+          <QaDetailSection
+            title={tx("qa.cases.revisions", "修订历史")}
+            hint={String(revisions.data?.total ?? 0)}
+          >
+            {revisions.error ? (
+              <QaErrorBar message={revisions.error} onRetry={revisions.reload} />
+            ) : null}
+            {(revisions.data?.items.length ?? 0) === 0 ? (
+              <p className="text-[12px] text-muted-foreground">
+                {tx("qa.cases.noRevisions", "还没有修订记录")}
+              </p>
+            ) : (
+              <ul
+                className="flex flex-col gap-1 text-[12px]"
+                data-testid="qa-case-revisions"
+              >
+                {revisions.data?.items.map((item) => (
+                  <li
+                    key={item.id}
+                    className="rounded-lg border border-border/60 bg-card px-2.5 py-1.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-[11.5px]">r{item.revision}</span>
+                      <QaBadge tone="neutral">{item.change_source}</QaBadge>
+                      <span className="text-muted-foreground">
+                        {formatQaTime(item.created_at)}
+                      </span>
+                      <span className="ml-auto truncate font-mono text-[10.5px] text-muted-foreground/70">
+                        {item.content_hash.slice(0, 12)}
+                      </span>
+                    </div>
+                    {item.changed_by ? (
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">
+                        {item.changed_by}
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
           </QaDetailSection>
 
           <QaDetailSection title={tx("qa.cases.api", "API 定义")} hint="JSON">

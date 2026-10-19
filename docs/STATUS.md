@@ -21,9 +21,9 @@ The QA test row and the API asset layer were re-verified on 2026-10-19 in worktr
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 164 passed in 46.10s (2026-10-19, `feat/qa-api-testing`) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 170 passed in 46.84s (2026-10-19, `feat/qa-api-testing`) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
-| QA workbench tests | `cd webui && npx vitest run qa-` | 8 passed (2026-10-18) |
+| QA workbench tests | `cd webui && npx vitest run qa-` | 11 passed (2026-10-19) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
 
 CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 7m57s. The same WebUI suite takes 170s on this 6-vCPU host, so budget roughly three times the local run for CI; the webui job is capped at 15 minutes.
@@ -40,6 +40,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 - MCP API asset tools: `qa_api_catalog` (ingest/list/get/diff), `qa_api_workflow` (create/get/validate/submit/apply/resume/export) and `qa_api_run` (preflight/start/get) in `nanobot/qa/api_tools.py`, registered in the stdio MCP server. Local OpenAPI files are only read under `NANOBOT_QA_SPEC_ROOTS`.
 - Pinned API runs: `nanobot/qa/execution.py` gates a run with preflight, executes ready cases through the fixed `nanobot/qa/templates/case_template.py` in a subprocess, pins each case revision in the run report, batches above 200 cases, masks credentials (bearer or JSON login, `env:NAME` references) and classifies every failure. `api.extract` plus `{{run.<name>}}` chains values between cases; a failed login persists a run with `classification: auth_failed`.
 - One run pipeline: `service.execute_cases` (the WebUI route, the `qa_run` tool, the CLI and scheduled runs) is an adapter over the same pinned pipeline, so every entry point refuses unready cases, pins revisions, batches and masks. Only `ready` cases execute; the old in-process loop and its 200-case cap are gone (ADR 0008).
+- Workbench surface (ADR 0009): a new API assets tab lists the catalog with evidence and the normalized spec, the run drawer renders the structured summary, per-phase counts, pinned case revisions and failure classifications, and the case drawer lists revision history. The read routes are `GET /api/qa/api-operations`, `GET /api/qa/api-operations/{id}` and `GET /api/qa/cases/{id}/revisions`; writes stay on the `qa.*` channel.
 - Ordered run plans: `plan={version, setup, cases, cleanup}` with `{case_id, revision?}` steps. Setup runs first, a failed setup step marks the cases phase `dependency_blocked`, cleanup always runs, and a cleanup failure is classified `cleanup_failed`. A pinned revision must match the case's current revision, and the run report records the plan with resolved revisions.
 - Background runs: `qa_api_run start` returns a `running` row and executes on `nanobot/qa/scheduler.py`, which serializes runs per project and lets different projects proceed in parallel. `get` polls; `wait=true` blocks. A gateway restart leaves a `running` row as evidence instead of rewriting it.
 - QA workbench: `webui/src/components/qa/` and `webui/src/lib/qa-api.ts` (71 TS/TSX files including the API client).
@@ -48,6 +49,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 
 ## Known gaps
 
+- The workbench run button now refuses draft cases with the case codes; the release note for that behavior change is still owed to operators.
 - A parallel session owns `feat/qa-workbench-polish` with its own schema v3 content (a `schedules` table and YAML case-index columns) and `nanobot/qa/scheduler.py`; this branch renamed its run queue to `nanobot/qa/run_queue.py`. Merging both needs a full gate run on the merged tree, not a version bump (ADR 0007).
 - CI runs `.github/workflows/fork-gate.yml` on pushes to `main` and on pull requests, with the same documentation-only filter on both events: the Python gate (`ruff check nanobot/qa`, `pytest tests/qa`) and the QA workbench WebUI suite, both on `ubuntu-24.04`. The inherited upstream `ci.yml` is disabled manually; re-enable it only for changes that touch Docker, the TUI or the whole WebUI.
 - The blank start page no longer renders the hero greeting: it was removed in favour of the workbench pane, and the owner confirmed that is intended. Seven assertions in `app-layout.test.tsx` and `temporary-chat-navigation.test.tsx` still expected the greeting, and two of those expected a `Back to chat` control that settings and apps no longer render when no chat is mounted. They were retargeted to `workbench-pane-new-topic` and a boot wait on 2026-10-18.
