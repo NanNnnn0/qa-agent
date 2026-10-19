@@ -91,6 +91,7 @@ Pre-git fallback: `/root/qa-agent-deploy.tar.gz` (2026-10-18 11:12) and `/root/d
 
 ## Known pitfalls
 
+- The editable install records the entry points of whichever branch was installed last. A branch that changes `[project.entry-points]` therefore poisons the venv for other branches: `feat/qa-trace` adds `qa = qa_trace.cli:main` and a `pytest11` plugin, and switching to `main` without reinstalling leaves pytest importing a module that is not on that branch, so the gate dies with `ModuleNotFoundError: No module named 'qa_trace.pytest_plugin'`. After any branch switch that touches entry points, run `.venv/bin/pip install -e . --no-deps` before trusting the gate.
 - The checkout is mode 777: any local process can write it. That is exactly why sessions must not share it.
 - nginx applies basic auth on 8443 but exempts `/api/`; a 401 on the workbench is a proxy problem, not an app problem.
 - `proxy_read_timeout` is 3600s for long agent runs; a hang beyond that is a proxy timeout, not a gateway crash.
