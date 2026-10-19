@@ -100,6 +100,35 @@ export interface QaCase {
   author: string;
   created_at: string;
   updated_at: string;
+  /** Trace type (`api`/`ui`/`functional`/…); wider than the legacy `kind`. */
+  type?: string;
+  /** Trace review status (`draft`/`reviewed`/`deprecated`). */
+  trace_status?: string;
+  /** Automation state (`todo`/`doing`/`done`/`manual`). */
+  automation?: string;
+  /** Test points the case covers (the `测试点` chain badge). */
+  testpoints?: string[];
+  /** Sources the case hangs off directly (the `来源` chain badge). */
+  sources?: string[];
+  direct_reason?: string | null;
+  risk?: string | null;
+  owner?: string | null;
+  note?: string | null;
+  /** `{binding}` when a pytest script is bound (the `脚本` chain badge). */
+  script?: { binding: string; resolves?: boolean | null } | null;
+  /** Whether the derived index asks for a re-check (the `需复核` badge). */
+  needs_recheck?: boolean;
+  recheck_reasons?: string[];
+  /** A draft lives under `draft/`; a reviewed case lives under `cases/`. */
+  draft?: boolean;
+  batch?: string | null;
+  /** Project-relative YAML file that holds this case. */
+  yaml_path?: string;
+  legacy_id?: string | null;
+  /** A hand-written SQLite row that has not been migrated yet (read-only). */
+  legacy?: boolean;
+  /** The case has no test point and no source, so it cannot be reviewed. */
+  needs_links?: boolean;
 }
 
 export interface QaScript {
@@ -329,7 +358,7 @@ function normalizeCaseApi(value: unknown): QaCaseApi {
 
 function normalizeCase(value: unknown): QaCase {
   const row = isRecord(value) ? value : {};
-  return {
+  const case_: QaCase = {
     id: text(row.id),
     project_id: text(row.project_id),
     code: text(row.code),
@@ -351,6 +380,33 @@ function normalizeCase(value: unknown): QaCase {
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
+  if (row.type !== undefined) case_.type = text(row.type);
+  if (row.trace_status !== undefined) case_.trace_status = text(row.trace_status);
+  if (row.automation !== undefined) case_.automation = text(row.automation);
+  if (row.testpoints !== undefined) case_.testpoints = textList(row.testpoints);
+  if (row.sources !== undefined) case_.sources = textList(row.sources);
+  if (row.direct_reason !== undefined) case_.direct_reason = text(row.direct_reason) || null;
+  if (row.risk !== undefined) case_.risk = text(row.risk) || null;
+  if (row.owner !== undefined) case_.owner = text(row.owner) || null;
+  if (row.note !== undefined) case_.note = text(row.note) || null;
+  if (isRecord(row.script)) {
+    case_.script = {
+      binding: text(row.script.binding),
+      resolves:
+        typeof row.script.resolves === "boolean" ? row.script.resolves : null,
+    };
+  } else if (row.script === null) {
+    case_.script = null;
+  }
+  if (row.needs_recheck !== undefined) case_.needs_recheck = Boolean(row.needs_recheck);
+  if (row.recheck_reasons !== undefined) case_.recheck_reasons = textList(row.recheck_reasons);
+  if (row.draft !== undefined) case_.draft = Boolean(row.draft);
+  if (row.batch !== undefined) case_.batch = text(row.batch) || null;
+  if (row.yaml_path !== undefined) case_.yaml_path = text(row.yaml_path);
+  if (row.legacy_id !== undefined) case_.legacy_id = text(row.legacy_id) || null;
+  if (row.legacy !== undefined) case_.legacy = Boolean(row.legacy);
+  if (row.needs_links !== undefined) case_.needs_links = Boolean(row.needs_links);
+  return case_;
 }
 
 function normalizeScript(value: unknown): QaScript {
@@ -769,6 +825,12 @@ export interface QaCaseInput {
   api?: QaCaseApi;
   expected?: string;
   tags?: string[];
+  /** Trace link: without a test point or a source the case stays a draft. */
+  testpoints?: string[];
+  sources?: string[];
+  direct_reason?: string;
+  risk?: string;
+  note?: string;
 }
 
 export interface QaScriptInput {
@@ -887,6 +949,11 @@ export async function createQaCase(
       api: input.api,
       expected: input.expected,
       tags: input.tags,
+      testpoints: input.testpoints,
+      sources: input.sources,
+      direct_reason: input.direct_reason,
+      risk: input.risk,
+      note: input.note,
     }),
   );
   return readEntity(payload, "case", normalizeCase);
@@ -910,6 +977,35 @@ export async function deleteQaCase(
   id: string,
 ): Promise<void> {
   await mutation(transport, "qa.case.delete", { id });
+}
+
+/**
+ * Mark a case as reviewed (the explicit human action).
+ *
+ * The backend writes the YAML document with `status: reviewed`.  A case that
+ * still has no test point or source keeps living under `draft/` — the caller
+ * gets that back in `needs_links`, which the library renders as a warning.
+ */
+export async function markQaCaseReviewed(
+  transport: QaMutationTransport,
+  id: string,
+  fields: Partial<Omit<QaCaseInput, "project_id">> = {},
+): Promise<QaCase> {
+  return updateQaCase(transport, id, { ...fields, status: "ready" });
+}
+
+/**
+ * Archive a case (delete = tombstone).
+ *
+ * The YAML file moves to `tombstones/<ID>.yaml` with `status: deprecated`; the
+ * ID is retired and the default listing stops showing it.
+ */
+export async function archiveQaCase(
+  transport: QaMutationTransport,
+  id: string,
+  reason?: string,
+): Promise<void> {
+  await mutation(transport, "qa.case.delete", reason ? { id, reason } : { id });
 }
 
 export async function importQaCases(

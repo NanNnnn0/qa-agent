@@ -1,0 +1,5 @@
+schema_version: 1
+project_id: shop
+name: Demo 商城
+modules:
+- SHOP

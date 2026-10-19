@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -41,12 +42,19 @@ from .drafts import (
     render_draft_list,
     render_review_outcome,
 )
-from .errors import EntityNotFoundError, QaTraceError
+from .errors import EntityNotFoundError, MigrateError, QaTraceError
 from .failure import compute_failure, render_failure
 from .impact import compute_impact, render_impact
 from .loader import load_project
+from .migrate import MIGRATION_BATCH, migrate_sqlite_cases, render_migration
 from .report import build_report, render_report
 from .staleness import compute_stale, render_stale
+
+#: Environment variable the product uses to point at its QA SQLite database.
+QA_DB_ENV = "NANOBOT_QA_DB"
+
+#: Default directory the migration writes into (relative to the cwd).
+DEFAULT_MIGRATE_ROOT = Path("qa-workbench") / "projects"
 
 
 def _run_check(args: argparse.Namespace) -> int:
@@ -184,6 +192,27 @@ def _run_failure(args: argparse.Namespace) -> int:
         else render_failure(report)
     )
     return report.exit_code
+
+
+def _run_migrate_sqlite(args: argparse.Namespace) -> int:
+    database = args.db or os.environ.get(QA_DB_ENV, "").strip()
+    if not database:
+        raise MigrateError(
+            f"no SQLite database: pass --db PATH or set {QA_DB_ENV}",
+            field="--db",
+        )
+    report = migrate_sqlite_cases(
+        Path(database),
+        Path(args.root),
+        project=args.project,
+        batch=args.batch,
+    )
+    print(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+        if args.json
+        else render_migration(report)
+    )
+    return 0
 
 
 def _print_diagnostics(result: CheckResult) -> None:
@@ -374,6 +403,35 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(review_reject)
     review_reject.set_defaults(handler=_run_review_reject)
 
+    migrate = trace_commands.add_parser(
+        "migrate-sqlite",
+        help="export the legacy SQLite cases as YAML drafts (one-way, read-only DB)",
+    )
+    migrate.add_argument(
+        "--db",
+        metavar="PATH",
+        help=f"QA SQLite database path (default: ${QA_DB_ENV})",
+    )
+    migrate.add_argument(
+        "--project",
+        metavar="KEY",
+        help="only this SQLite project key or id (default: every project)",
+    )
+    migrate.add_argument(
+        "--root",
+        default=DEFAULT_MIGRATE_ROOT.as_posix(),
+        metavar="DIR",
+        help=f"trace project root to write into (default: {DEFAULT_MIGRATE_ROOT.as_posix()})",
+    )
+    migrate.add_argument(
+        "--batch",
+        default=MIGRATION_BATCH,
+        metavar="ID",
+        help=f"draft batch that receives the migrated cases (default {MIGRATION_BATCH})",
+    )
+    _add_json(migrate)
+    migrate.set_defaults(handler=_run_migrate_sqlite)
+
     return parser
 
 
@@ -381,7 +439,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return its process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    root = Path(args.project)
+    project = getattr(args, "project", None)
+    # ``migrate-sqlite`` has an optional ``--project`` key (not a directory), so
+    # the error-mapping root only uses it when it really is a path.
+    root = Path(project) if project else Path.cwd()
     try:
         return int(args.handler(args))
     except QaTraceError as exc:

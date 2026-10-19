@@ -1,0 +1,14 @@
+schema_version: 1
+id: EX-SHOP-01
+type: ex
+module: SHOP
+title: SHOP 示例站点历史用例库（迁移前 SQLite 基线）
+evidence:
+- type: exploration
+  locator: artifacts/legacy/shop-cases.json
+  description: 从 nanobot QA SQLite 的 cases 表导出的 8 条迁移前用例原文（含 steps 与 api 断言），是本次迁移草稿的唯一事实来源
+  verified: verified_local
+status: active
+confidence: confirmed
+owner: qa-agent
+note: 期望基线来自 QA 编写的历史用例原文（见 evidence 导出文件），不是本次由 agent 推断；拿到真实需求或接口契约后应补一层上层来源，并把 confidence 收回 observed 后再确认

@@ -1,0 +1,15 @@
+schema_version: 1
+id: TP-SHOP-002
+module: SHOP
+title: 下单成功主流程
+sources:
+- EX-SHOP-01
+method: scenario
+risk: high
+status: reviewed
+owner: qa-agent
+tags:
+- shop
+- order
+- api
+note: 覆盖 TC-SHOP-002（SHOP-API-002）：库存充足时 POST /api/orders 返回 201 并生成订单号

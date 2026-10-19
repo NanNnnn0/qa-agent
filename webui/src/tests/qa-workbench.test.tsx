@@ -98,6 +98,21 @@ const JUNIT_XML =
 
 const reviewTask = { ...task, status: "needs_review", progress: 80 };
 
+/** A reviewed trace case with a full chain: source → test point → script. */
+const tracedCase = {
+  ...qaCase,
+  testpoints: ["TP-LOGIN-005"],
+  sources: ["REQ-LOGIN-01"],
+  script: { binding: "scripts/test_login.py::test_lock_after_5_failures", resolves: true },
+  needs_recheck: true,
+  recheck_reasons: ["dependency_changed"],
+  trace_status: "reviewed",
+  draft: false,
+  batch: null,
+  needs_links: false,
+  yaml_path: "cases/TC-LOGIN-003.yaml",
+};
+
 const overviewPayload = {
   ok: true,
   counts: { projects: 1, cases: 12, ready_cases: 9, scripts: 3, runs: 4, tasks: 7, active_tasks: 2 },
@@ -397,5 +412,76 @@ describe("QA workbench", () => {
     expect(await screen.findByTestId("qa-run-drawer")).toBeInTheDocument();
     // The imported run carries the `ci` trigger badge.
     expect(screen.getAllByText("ci").length).toBeGreaterThan(0);
+  });
+
+  it("shows the trace chain badges of a case (来源/测试点/脚本/需复核)", async () => {
+    stubFetch((path) => {
+      if (path === "/api/qa/cases") {
+        return jsonResponse({ ok: true, items: [tracedCase], total: 1, limit: 200, offset: 0 });
+      }
+      if (path === "/api/qa/cases/case-1") {
+        return jsonResponse({ ok: true, case: tracedCase });
+      }
+      return null;
+    });
+    renderWorkbench({ initialTab: "cases" });
+
+    const chain = await screen.findByTestId("qa-case-chain");
+    expect(chain).toHaveTextContent("来源 1");
+    expect(chain).toHaveTextContent("测试点 1");
+    expect(chain).toHaveTextContent("脚本");
+    expect(chain).toHaveTextContent("需复核");
+  });
+
+  it("marks a case as reviewed with qa.case.update and status=ready", async () => {
+    const user = userEvent.setup();
+    stubFetch((path) => {
+      if (path === "/api/qa/cases") {
+        return jsonResponse({ ok: true, items: [tracedCase], total: 1, limit: 200, offset: 0 });
+      }
+      if (path === "/api/qa/cases/case-1") {
+        return jsonResponse({ ok: true, case: tracedCase });
+      }
+      return null;
+    });
+    const { requestMutation } = renderWorkbench({ initialTab: "cases" }, (action) =>
+      action === "qa.case.update" ? { ok: true, case: tracedCase } : undefined,
+    );
+
+    await user.click(await screen.findByText("登录成功返回 token"));
+    await user.click(await screen.findByTestId("qa-case-review"));
+
+    await waitFor(() => {
+      expect(requestMutation).toHaveBeenCalledWith(
+        "qa.case.update",
+        expect.objectContaining({ id: "case-1", status: "ready" }),
+        expect.any(Number),
+      );
+    });
+  });
+
+  it("archives a case with qa.case.delete", async () => {
+    const user = userEvent.setup();
+    stubFetch((path) => {
+      if (path === "/api/qa/cases") {
+        return jsonResponse({ ok: true, items: [tracedCase], total: 1, limit: 200, offset: 0 });
+      }
+      if (path === "/api/qa/cases/case-1") {
+        return jsonResponse({ ok: true, case: tracedCase });
+      }
+      return null;
+    });
+    const { requestMutation } = renderWorkbench({ initialTab: "cases" });
+
+    await user.click(await screen.findByText("登录成功返回 token"));
+    await user.click(await screen.findByTestId("qa-case-archive"));
+
+    await waitFor(() => {
+      expect(requestMutation).toHaveBeenCalledWith(
+        "qa.case.delete",
+        { id: "case-1" },
+        expect.any(Number),
+      );
+    });
   });
 });

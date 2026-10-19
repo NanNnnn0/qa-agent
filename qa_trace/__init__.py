@@ -113,6 +113,13 @@ from .markers import (
     scan_markers,
 )
 from .metrics import Ratio, compute_metrics
+from .migrate import (
+    MIGRATION_BATCH,
+    MigratedProject,
+    MigrationReport,
+    migrate_sqlite_cases,
+    render_migration,
+)
 from .models import (
     SCHEMA_VERSION,
     Automation,
@@ -173,6 +180,7 @@ __all__ = [
     "INDEX_FILENAME",
     "MARKER_CODES",
     "MANIFEST_VERSION",
+    "MIGRATION_BATCH",
     "RULE_CODES",
     "RULE_NUMBERS",
     "SCHEMA_VERSION",
@@ -203,6 +211,8 @@ __all__ = [
     "IndexEntry",
     "MarkerScan",
     "Method",
+    "MigratedProject",
+    "MigrationReport",
     "NodeResult",
     "Outcome",
     "ParsedId",
@@ -270,6 +280,7 @@ __all__ = [
     "load_project",
     "load_yaml_document",
     "materialize_tree",
+    "migrate_sqlite_cases",
     "new_draft",
     "new_id",
     "normalize_id",
@@ -281,6 +292,7 @@ __all__ = [
     "render_draft_list",
     "render_failure",
     "render_impact",
+    "render_migration",
     "render_report",
     "render_review_outcome",
     "render_stale",

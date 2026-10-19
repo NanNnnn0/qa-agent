@@ -1,0 +1,40 @@
+schema_version: 1
+id: TC-SHOP-005
+code: SHOP-API-005
+legacy_id: case_1c0f6b289624
+title: 未知 SKU 返回 404 + 1002
+testpoints:
+- TP-SHOP-003
+priority: P1
+type: api
+status: reviewed
+steps:
+- action: POST /api/orders
+  expected: 返回 SKU 不存在
+automation:
+  status: todo
+expected: 返回 SKU 不存在
+api:
+  assertions:
+  - expect: 404
+    type: status
+  - expect: 1002
+    op: equals
+    path: $.code
+    type: json_path
+  request:
+    body:
+      qty: 1
+      sku: NOPE-999
+    headers:
+      Content-Type: application/json
+    method: POST
+    path: /api/orders
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_1c0f6b289624
+tags:
+- order
+- negative
+source: ai

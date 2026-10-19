@@ -1,10 +1,10 @@
-# qa-trace 设计说明（P0 模型冻结 + P1 图校验与指标 + P2 执行闭环 + P3 复核与入库 + P4 工作台接入 + P5 Git/CI 门禁）
+# qa-trace 设计说明（P0 模型冻结 + P1 图校验与指标 + P2 执行闭环 + P3 复核与入库 + P4 工作台接入 + P5 Git/CI 门禁 + P6 用例源迁移）
 
 > 依据 `qa-trace-spec.md`（测试用例追溯链规范 v1）与 `qa-trace-implementation-plan.md`
 > （实施与派发方案），以方案第 2 节（规范修订）、第 3 节（模型）、第 4 节（校验器）、
 > 第 5 节（指标）、第 3.4 节（审核与有效性）、第 6 节（查询和变更传播）、第 7 节（命令接口）
 > 与第 8 节（P3 复核与入库、P4 工作台接入、P5 CI）为准。这两份文档在实施工作区保存，
-> 不在本仓库内。本文记录 **P0、P1、P2、P3、P4 与 P5** 的落地决定、规则码、退出码、
+> 不在本仓库内。本文记录 **P0、P1、P2、P3、P4、P5 与 P6** 的落地决定、规则码、退出码、
 > 索引/manifest/diff 形状、HTTP 接口、CI 接入与边界。
 
 ## 1. 交付内容
@@ -93,6 +93,29 @@
 | `.github/workflows/qa-trace.yml` | 安装包 → `pytest tests/qa_trace` → demo 项目 `check` → 上传报告 artifact → PR 上 `diff --base origin/<base_ref>`（回归即失败），上传 diff artifact |
 | `.pre-commit-config.yaml` | 本地 hook（`language: system`）：提交前对 demo 项目跑快检，不依赖远端仓库 |
 | `tests/qa_trace/test_diff.py` | 临时 git 仓库两个 commit：无改动 0、新悬空引用 1、覆盖率下降 1、未知 ref 2、非 git 2、基线缺项目 2、JSON 形状、容差、工作区不被改写 |
+
+### 1.7 P6（用例源迁移：YAML 是真源，SQLite 是索引）
+
+| 位置 | 内容 |
+|---|---|
+| `qa_trace/compat.py` | SQLite ↔ trace 词汇映射：`kind↔type`（`manual→functional`，反向收敛到 `manual`）、`status↔reviewed/ready`、`automation` 派生；唯一翻译点 |
+| `qa_trace/yamlfile.py` | 全库共用的原子 YAML 写入（临时文件 + fsync + `os.replace`，保留键序） |
+| `qa_trace/caseyaml.py` | 用例文档形状与文件布局：`case_document()`、`cases/`、`draft/<batch>/cases/`、`tombstones/`、`TC-<MODULE>-<seq>` 分配（含墓碑，ID 不复用）、`iter_case_documents()` |
+| `qa_trace/models.py` | `Case` 新增 `code`/`expected`/`api`/`legacy_id`（工作台业务字段，仍由 YAML 真源承载）；`api` 块形状在加载期校验 |
+| `qa_trace/hashing.py` | `FINGERPRINT_VERSION = 2`：摘要纳入上述四个字段，索引配方不匹配即拒绝（写入路径用 `load_index_for_write` 视为空索引重建） |
+| `qa_trace/drafts.py` | 写入统一走 `yamlfile.write_yaml`；`read_draft_entity` 公开（产品层读草稿复用） |
+| `qa_trace/index.py` | `load_index_for_write()`：读索引遇到旧配方按空索引处理（派生数据，写入不必失败） |
+| `qa_trace/migrate.py` | `qa trace migrate-sqlite`：只读打开 SQLite → 逐项目写 YAML 草稿（`legacy_id` 回指、`code` 保留、`TC-*` 新 ID）→ 计数报告 |
+| `nanobot/qa/case_files.py` | 用例库适配器：`qa_case` 工具与 `/api/qa/cases*` 的唯一实现；YAML 先写、再重建派生索引；删除=墓碑；无链路的「已评审」仍是草稿 |
+| `nanobot/qa/store.py` | `SCHEMA_VERSION = 3`：`cases` 增加 `derived/legacy_id/yaml_path`，去掉 `UNIQUE(project_id, code)`，新增 `replace_derived_cases()` / `case_codes()` / `derived_case_ids()` / `derived_case_count()`，可见性规则（被 YAML 认领的旧行隐藏） |
+| `nanobot/qa/http.py` | `/api/qa/cases*` 全部改走 `CaseFiles`；响应形状不变，新增链路徽标字段；写字段增加 `testpoints/sources/direct_reason/risk/note/batch` |
+| `nanobot/agent/tools/qa.py` | `qa_case` 改走 `CaseFiles`（list/get/create/bulk_create/update/delete），工具契约不变 |
+| `nanobot/cli/qa.py` | `nanobot qa reindex [--project KEY] [--root DIR]`：从 YAML 重建 SQLite 派生索引（等价于方案里的 `qa trace reindex`） |
+| `webui/src/lib/qa-api.ts` | `QaCase` 增加 `type/trace_status/testpoints/sources/script/needs_recheck/draft/legacy` 等只读徽标字段；`markQaCaseReviewed()`、`archiveQaCase()` |
+| `webui/src/components/qa/QaCaseLibrary.tsx` | 「用例库」：链路徽标列（来源/测试点/脚本/需复核）、追溯链路编辑区、显式「标记为已评审」、删除改为「归档」 |
+| `qa-workbench/projects/shop/` | SHOP 演示库：8 条 SQLite 用例迁移成的 YAML 草稿（`draft/sqlite-migration/`） |
+| `tests/qa_trace/test_compat.py`、`test_yamlfile.py`、`test_case_fields.py`、`test_caseyaml.py`、`test_migrate.py` | 词汇映射、原子写入、新字段/摘要/索引配方、文档布局、迁移（只读、幂等、计数、退出码） |
+| `tests/qa/test_case_files.py` | 用例库契约：草稿默认、链接后才能晋级、墓碑与 ID 退休、索引重建、旧行只读、HTTP 写入 YAML、词汇漂移守卫 |
 
 ## 2. 关键决定
 
@@ -362,6 +385,69 @@
     `--base` 是 `origin/${{ github.base_ref }}`（`fetch-depth: 0`）。pre-commit 是本地
     hook，只跑 demo 项目的快检，不联网、不拉远端仓库。
 
+### 2.7 P6（新增）
+
+54. **YAML 是唯一的用例真源，SQLite 的 `cases` 表降级为派生索引。** 写路径先写 YAML，
+    再重建该项目的派生行（`replace_derived_cases`），所以任何时刻「磁盘上的文件」都是
+    权威答案；索引只是让列表/过滤/搜索仍走一条 SQL。旧行（`derived = 0`）不删除，是
+    回滚副本；当某条 YAML 用例通过 `legacy_id`（迁移时记录）**或同一个 `code`**（把提交的
+    库部署到另一台单独 seed 过的数据库时，行 id 是本地的、`code` 才是业务身份）认领它时，
+    它才从列表里隐藏——这样「迁移过的库」不会双份计数，「还没迁移的库」也不会因为新建
+    一条 YAML 用例而突然少掉原来的用例。
+55. **文件位置就是复核状态。** `cases/<ID>.yaml` 是正式库，`draft/<batch>/cases/<ID>.yaml`
+    是草稿，`tombstones/<ID>.yaml` 是墓碑。没有额外的状态列：迁移一条文件、看一眼目录
+    就知道它在哪一步。`status` 字段仍然写在文档里（`draft|reviewed|deprecated`），但
+    「正式库」与「草稿」由目录决定，因为加载器只读 `cases/`。
+56. **无链路的用例不能进正式库，这不是 bug 而是规则 5。** `Case.from_dict` 要求
+    `testpoints` 或直挂 `sources`（直挂还要 `direct_reason`），所以一个只有标题/步骤的
+    用例无法被 `cases/` 接受，否则整个项目都 unloadable。因此：迁移出来的 SQLite 用例
+    （天生没有链路）全部写进 `draft/`；更新接口允许把 `status` 记成 `reviewed`，但只要
+    没有链路，文件仍留在 `draft/`，响应里带 `needs_links: true`，页面对此事明示。
+    一旦补上测试点/来源再标记已评审，文件就移动到 `cases/` 并写入索引的 review 记录。
+    晋级前还会加载一次项目、核对被引用的测试点/来源确实存在：写错 ID 直接 409，而不是
+    把干净库变成一条悬空引用（`TRACE_REF_MISSING`）。
+57. **删除是墓碑，不是 `rm`。** 删除把文档原地改成 `status: deprecated` 并加一个
+    `tombstone: {at, from, reason, by}` 块，移动到 `tombstones/<ID>.yaml`；默认列表
+    排除 `deprecated`，`?status=deprecated` 仍能查到，ID 分配器扫描墓碑因而**永不复用**
+    已删除的编号（规则 5 的「ID 退休」在这里落地一半：没有 `ids/<id>.yaml` 台账，但
+    墓碑足以阻止重用）。
+58. **ID 用可读的计数器，不是 UUID4。** 迁移要求 `TC-<MODULE>-<seq>`，工作台里人也要读
+    得懂，所以新增用例同样按「项目内该模块最大号 + 1」分配（补零到 3 位）。代价是并发
+    写入可能撞号（见限制 41）；写文件本身是原子的，加载器也会对重名文件报
+    `TRACE_ID_DUPLICATE`，不会静默覆盖。UUID4 仍然是 `draft new` / `qa trace` 内部
+    新建实体的默认（P3 决定不变），两条路径互不影响。
+59. **响应形状冻结成兼容层，新字段只增不改。** `qa_case` 工具与 `/api/qa/cases*` 继续
+    返回 `id/code/title/kind/priority/status/preconditions/steps/api/expected/tags/source/
+    author/created_at/updated_at/project_id`，`kind↔type`、`status` 的翻译只在
+    `qa_trace/compat.py` 里做一次；新增字段（`type/trace_status/testpoints/sources/script/
+    needs_recheck/draft/batch/yaml_path/legacy_id/legacy/needs_links`）是纯增量，旧客户端
+    忽略即可。WebUI 的 `normalizeCase` 对每个新字段做防御式归一化。
+60. **`api` 块是一等字段，不是 `data` 里的自由 JSON。** 工作台的「API 定义」直接映射到
+    用例文档的 `api:`（`request/assertions/variables`），加载期就拒绝无法执行的结构
+    （缺 `request.path`、`assertions` 不是列表等），执行器（`nanobot/qa/runner.py`）
+    继续消费同一形状。用例的 `steps` 仍是必填：API 用例没有显式步骤时，从请求与断言
+    派生一条（`GET /api/products` + `HTTP 200；$.code equals 0`），保证文档可加载。
+61. **摘要把新字段算进去，但配方版本必须提升。** `code/expected/api/legacy_id` 都是业务
+    字段（改了就应触发复核），因此 `FINGERPRINT_VERSION = 2`；旧索引在**读**路径被拒绝
+    （`require_compatible`，提示 `stale --write`），在**写**路径按空索引重建
+    （`load_index_for_write`）——派生数据不该让一次编辑失败。
+62. **迁移只读数据库、只写 YAML，且可重复执行。** `qa trace migrate-sqlite` 用
+    `mode=ro` 打开 SQLite（测试用字节对比证明库文件未变），逐项目导出：保留 `code`、
+    写入 `legacy_id`、新 ID 从项目内最大号续；已经导出过的行按 `legacy_id` 跳过，所以
+    重跑不会产生第二份用例。`deprecated` 行写成墓碑；其余一律草稿（理由见决定 56）。
+63. **索引重建有两个入口，读路径还会自愈一次。** `nanobot qa reindex` 是显式命令；
+    另外 `CaseFiles` 发现某项目「有 YAML 用例但一条派生行都没有」（新检出、刚迁移）时
+    会就地重建一次，避免用户第一次打开页面看到空列表。已经有了派生行的项目不会被
+    自动重建——否则每次读都等于一次全量扫描；手工改完 YAML 请跑 `reindex`。
+64. **旧行是可读的只读视图。** 尚未迁移的 SQLite 行仍然出现在列表里（`legacy: true`），
+    详情可看，但更新/删除会返回 409 并提示先跑 `qa trace migrate-sqlite`。这样「先 seed
+    再迁移」的演示顺序不会在中间态看起来像坏页面。
+65. **归档/评审都走既有 mutation，不新增动作。** 「标记为已评审」= `qa.case.update`
+    带 `status=ready`；「归档」= `qa.case.delete`（带可选 `reason`）。`QA_MUTATION_PATHS`
+    不扩张，WebUI 的 CSRF/写通道规则不变；审核身份仍是自填的 `reviewer`（与 P4 相同）。
+66. **演示库随仓库提交。** `qa-workbench/projects/shop/` 是真实迁移产物（8 条用例），
+    和 `login-lock` 一起作为演示数据；`.qa-trace/` 仍在 gitignore 里，SQLite 库不进仓库。
+
 ## 3. 规则码
 
 ### 3.1 P0（文档层，全部 error）
@@ -468,6 +554,18 @@ P5 不新增校验规则（库内容仍由 P0–P3 的规则码判定），只�
 | `TRACE_DIFF_GIT_FAILED` | 找不到 git 可执行文件，或 `git archive` 失败、归档流不可读、含越界路径 |
 | `TRACE_DIFF_INVALID` | `--coverage-tolerance` 为负，或 `thresholds.diff_coverage_tolerance` 不是非负数 |
 
+### 3.7 P6（迁移输入错误码）
+
+P6 不新增校验规则（库内容仍由 P0–P3 的规则码判定），只新增一个「工具输入不可用」码：
+
+| code | 退出码 | 触发条件 |
+|---|---|---|
+| `TRACE_MIGRATE_INVALID` | 2 | `migrate-sqlite` 的数据库不存在/打不开、库里有 `projects`/`cases` 之外的表结构（不是 QA 库）、`--project` 指向不存在的项目、既没给 `--db` 也没有 `NANOBOT_QA_DB` |
+
+`qa trace reindex` 是产品命令（`nanobot qa reindex`），失败沿用 QA API 的错误类型：
+未知项目 → `QaNotFoundError`（CLI 里是 `typer.BadParameter`）；磁盘/YAML 不可读 →
+`QaValidationError` 或直接抛 `QaTraceError`（不被吞掉）。
+
 ## 4. 退出码
 
 `qa trace check` 与 `qa trace report` 使用同一套退出码：
@@ -523,6 +621,10 @@ P5 的 `qa trace diff` 单独一套（它不判“库是否合法”，只判“
 
 `diff` 的 2 与 `check` 的 2 语义不同：`check` 把“库读不出来”当 2，`diff` 把它当
 “新增 error”= 1，因为 diff 的结论必须是“变差/没变差”，而 CI 对 1 和 2 都是失败。
+
+P6 的迁移只有两个退出码：`0`（已导出，可能跳过了一些已迁移的行）与 `2`
+（`TRACE_MIGRATE_INVALID`：数据库/项目/参数不可用）。它不判断库是否合法（迁移出来的
+草稿本来就没有链路，正式库仍然是空的且 `check` 退出 0），因此不存在 1 的含义。
 
 ## 5. 覆盖范围
 
@@ -626,14 +728,42 @@ P5 的 `qa trace diff` 单独一套（它不判“库是否合法”，只判“
   见 §8.2。
 - **测试**：`tests/qa_trace/test_diff.py`（12 条）。
 
+### 5.7 P6
+
+- **用例文档**：`code`（人读编号，`SHOP-API-001`）、`expected`（用例级预期）、`api`
+  （结构化 `request/assertions/variables`）、`legacy_id`（迁移来源）；四个字段都参与
+  内容摘要（`FINGERPRINT_VERSION=2`）。
+- **用例文件布局**：`cases/`（正式）、`draft/<batch>/cases/`（草稿）、`tombstones/`
+  （墓碑）；`TC-<MODULE>-<seq>` 分配扫描三个目录，墓碑占号因而 ID 不复用。
+- **`qa_case` 工具**：list/get/create/bulk_create/update/delete 全部走 YAML；创建落在
+  `draft/workbench/`（`status: draft`），删除写墓碑；响应形状与旧 SQLite 版本一致，
+  另带链路徽标字段。
+- **`/api/qa/cases*`**：列表/详情/导出/创建/批量创建/更新/删除/导入全部走 YAML；
+  列表从派生索引读出（过滤/搜索/分页仍是 SQL），详情附带 YAML 链路徽标与
+  `needs_recheck`。
+- **派生索引**：`nanobot qa reindex [--project KEY] [--root DIR]` 从 YAML 重建
+  `derived = 1` 的行；读路径在「有 YAML 无索引行」时就地重建一次；旧行被同 `legacy_id`
+  或同 `code` 的派生行认领后隐藏，不删除。
+- **迁移**：`qa trace migrate-sqlite [--project SHOP] [--db PATH] [--root DIR] [--batch ID]`
+  只读导出 → `draft/sqlite-migration/cases/TC-<MODULE>-<seq>.yaml`，保留 `code`、
+  写 `legacy_id`、`deprecated` 行进墓碑；重跑按 `legacy_id` 跳过。报告给出
+  项目数/用例数/草稿/正式/墓碑/已迁移计数。
+- **WebUI 「用例库」**：链路徽标列（来源/测试点/脚本/需复核/草稿区）、追溯链路编辑区
+  （测试点/来源/直挂理由/风险）、显式「标记为已评审」、删除改为「归档」；草稿/已评审/
+  已归档三种文案；未迁移的旧行显示「只读，请先迁移」。
+- **测试**：`tests/qa_trace/`（compat、yamlfile、case 字段与摘要、caseyaml、migrate，
+  共 65 条）与 `tests/qa/test_case_files.py`（19 条）、`webui/src/tests/
+  qa-workbench.test.tsx` 新增 3 条链路/评审/归档用例。
+
 ## 6. P3 之后仍未覆盖（后续阶段）
 
 | 阶段 | 未实现内容 |
 |---|---|
 | P2 剩余 | pytest collection 与真实 nodeid 对照（`--qa-project` 只校验用例 ID 存在性，不 collect 用户测试）、xdist 下的结果汇总 |
-| P3 剩余 | 多实体晋级事务、项目写锁与中断恢复（方案 §7 的写锁/事务日志）、ID 分配与退休记录（`ids/<id>.yaml`、`qa retire`）、`qa trace case` 单条追溯命令、基于基线的删除/重命名影响面、`qa source mark-stale --all --reason`、SQLite 索引（方案 §6 允许先用内存索引） |
+| P3 剩余 | 多实体晋级事务、项目写锁与中断恢复（方案 §7 的写锁/事务日志）、`ids/<id>.yaml` 分配与退休台账（`qa retire`）、`qa trace case` 单条追溯命令、基于基线的删除/重命名影响面、`qa source mark-stale --all --reason` |
 | P4 剩余 | 工作台内的草稿**生成**（页面只审不生成，Agent 走 `qa trace draft new/add`）、后台任务与取消（追溯查询都是秒级同步读）、多项目对比视图、权限分级（能看追溯页的人就能审核） |
 | P5 剩余 | 分支保护/必需检查的仓库设置（属仓库配置，不在代码里）、`qa trace diff` 之外的历史趋势（多基线、报告归档对比）、CI 上的完整 collection（`diff` 与 `check` 一样只做静态 marker lint）、`--strict` 下 warn 变化是否算回归的策略开关 |
+| P6 剩余 | 多实体的 SQLite 迁移事务（逐文件写，无批次提交/回滚）、增量/差异迁移（每次都全表扫描）、把 SQLite 的 `scripts.case_ids` 映射到脚本绑定（`automation.script` 仍需人工补）、`migrate-sqlite` 之后自动 `reindex`（当前是两步）、并发写入下的 ID 分配台账 |
 
 P1 曾经**不做**的 `trace case` / `impact` 查询，P3 已交付 `impact`；`trace case` 仍缺
 （`impact --case` 覆盖了它的主要信息，但没有“单条用例全量视图”）。
@@ -1161,6 +1291,51 @@ mutation 响应：`{"ok": true, "stale": <stale --json>}`、
 - `diagnostics.new/resolved` 是完整诊断对象（与 `report` 的 `diagnostics.items` 同形）。
 - 临时物化目录不会出现在任何字段里（`project.root`/`repo_root` 是调用者给的路径）。
 
+### 7.9 `qa trace migrate-sqlite --json` 形状（P6）
+
+真实输出（本机 SHOP 演示库，8 条用例；`--root qa-workbench/projects`）：
+
+```json
+{
+  "migration_version": 1,
+  "db": "C:/Users/jn/.nanobot/qa/qa.sqlite3",
+  "root": "qa-workbench/projects",
+  "batch": "sqlite-migration",
+  "counts": {
+    "projects": 1,
+    "cases": 8,
+    "drafts": 8,
+    "formal": 0,
+    "tombstones": 0,
+    "skipped": 0,
+    "errors": 0
+  },
+  "projects": [
+    {
+      "key": "SHOP",
+      "project_id": "proj_8a86656ab0fa",
+      "project_dir": "qa-workbench/projects/shop",
+      "cases": 8,
+      "drafts": 8,
+      "formal": 0,
+      "tombstones": 0,
+      "skipped": 0
+    }
+  ],
+  "skipped": [],
+  "errors": []
+}
+```
+
+约定：
+
+- `counts.cases` = 本次写出的用例数；`drafts`/`formal`/`tombstones` 三者相加等于它；
+  `skipped` 是「该项目里已经有 `legacy_id` 相同的 YAML」的行数（重跑时等于用例总数）。
+- `errors[]` 是单条用例的文档构造失败（`{"case_id", "code", "message"}`），不影响其余
+  用例；输入级失败（库/项目/参数）直接抛 `TRACE_MIGRATE_INVALID`，不出 JSON。
+- 报告里的 `db`/`root` 是调用者给的路径，不展开成临时目录。
+- `legacy_id` 只出现在 YAML 文档里（以及派生索引行的 `legacy_id` 列），不出现在报告里。
+
 ## 8. 验证方式
 
 ```powershell
@@ -1363,6 +1538,50 @@ GitHub Actions 只在真实仓库运行，本机没有执行（见限制 34）�
 命令的退出码与 JSON，以及 YAML 可解析。分支保护（required checks）属于仓库设置，
 不在代码里。
 
+### 8.3 P6 验证与 SHOP 迁移结果
+
+```powershell
+# 0) 全量测试与静态检查（P6 收尾时的真实计数）
+.\.venv\Scripts\python.exe -m pytest tests/qa_trace tests/qa -q      # 428 passed
+.\.venv\Scripts\python.exe -m pytest tests/webui -q                  # 776 passed, 18 skipped
+cd webui; npm test -- qa                                             # 19 passed
+cd webui; npm run build                                              # tsc + vite, exit 0
+.\.venv\Scripts\ruff.exe check qa_trace nanobot tests/qa tests/qa_trace   # All checks passed
+
+# 1) 迁移只读 SQLite，把 8 条 SHOP 用例写成 YAML 草稿
+.\.venv\Scripts\python.exe -m qa_trace trace migrate-sqlite `
+  --project SHOP --db "$env:USERPROFILE\.nanobot\qa\qa.sqlite3" --root qa-workbench/projects
+# 1 project(s), 8 case(s): 8 draft, 0 formal, 0 tombstone, 0 already migrated, 0
+
+# 2) 迁移结果：项目元信息 + 8 个草稿文档（ID 连续、code 保留、legacy_id 回指）
+Get-ChildItem qa-workbench/projects/shop/draft/sqlite-migration/cases
+.\.venv\Scripts\python.exe -m qa_trace trace check --project qa-workbench/projects/shop   # OK（草稿不参与正式库）
+.\.venv\Scripts\python.exe -m qa_trace trace review list --project qa-workbench/projects/shop
+# 8 drafts / 1 batch；每条只差链路：TRACE_LINK_MISSING（附给人补测试点）
+
+# 3) 重建 SQLite 派生索引：列表变成 TC-* 行，旧行留作回滚
+.\.venv\Scripts\nanobot.exe qa reindex --project SHOP --root qa-workbench/projects
+# {"cases": 8, "drafts": 8, "reviewed": 0, "archived": 0}
+.\.venv\Scripts\nanobot.exe qa cases --project SHOP
+# TC-SHOP-001..008（code 仍是 SHOP-API-001..006 / SHOP-UI-001..002）
+.\.venv\Scripts\nanobot.exe qa status
+# cases 8 / ready_cases 0 / scripts 1 / runs 1 / tasks 3（旧行没有被双份计数）
+
+# 4) 幂等：再跑一次迁移不会产生新文件
+.\.venv\Scripts\python.exe -m qa_trace trace migrate-sqlite `
+  --project SHOP --db "$env:USERPROFILE\.nanobot\qa\qa.sqlite3" --root qa-workbench/projects
+# 8 already migrated, 0
+
+# 5) 错误路径：库不存在 / 项目不存在 / 没给库路径 都是 TRACE_MIGRATE_INVALID + 2
+.\.venv\Scripts\python.exe -m qa_trace trace migrate-sqlite --db nope.sqlite3   # 2
+.\.venv\Scripts\python.exe -m qa_trace trace migrate-sqlite --project NOPE --db <db>   # 2
+```
+
+用例库行为（`tests/qa/test_case_files.py` 覆盖）：创建写
+`draft/workbench/cases/TC-<KEY>-001.yaml`（`status: draft`）；无链路时 `update status=ready`
+仍然留在 `draft/`；补上 `TP-*`/来源后写进 `cases/` 并在 `.qa-trace/index.json` 记一条
+review；删除写 `tombstones/<ID>.yaml` 且下一个编号跳过它。
+
 ## 9. 已知限制
 
 1. **marker 对照是静态的**：`qa trace check` 只 `ast.parse` 被绑定的脚本，不 import、
@@ -1452,10 +1671,10 @@ GitHub Actions 只在真实仓库运行，本机没有执行（见限制 34）�
     §8.1 第 2 步。
 28. **一次 `tree` 请求整库返回**：链树不分页，也没有增量接口；1k Source / 20k Case
     的规模未做性能验收（同限制 15），工作台首屏只适合中小型库。
-29. **`/api/qa/trace/*` 与 SQLite 用例库是两套数据**：追溯页读的是
-    `qa-workbench/projects/` 下的 YAML 库，不是 `nanobot/qa/store.py` 里的
-    projects/cases。两者目前没有同步（方案明确“不作为第二份可编辑真源”，但也没有
-    做映射），页面上的「用例」与用例库标签的用例不是同一批记录。
+29. **「用例库」与「追溯」读的是同一个 YAML 库，但看到的范围不同**：用例库列出
+    `cases/` + `draft/<batch>/cases/`（含未挂链路的草稿与未迁移的旧 SQLite 行），追溯页
+    的链树只画正式库（草稿在 `draft/` 与 `review list` 里出现）。P6 之前这是两套数据，
+    现在 SQLite 只是 YAML 的派生索引（同一条用例不会有两份内容）。
 30. **安装成 wheel 后默认项目根不在检出目录**：`default_trace_root()` 用
     `nanobot/qa/trace_api.py` 的 `parents[2]` 推仓库根，`pip install` 之后那里是
     site-packages，默认根通常不存在（页面会显示“没有追溯项目”）。部署时请显式设置
@@ -1487,3 +1706,31 @@ GitHub Actions 只在真实仓库运行，本机没有执行（见限制 34）�
 37. **`diff` 不写任何状态**：不更新 `.qa-trace/index.json`、不写报告文件、不缓存
     基线；每次调用都重新解析 ref、重新物化、重新跑两侧校验。库大时是“两次全量
     check”的成本（同限制 15），没有增量 diff。
+38. **迁移出来的用例全是草稿，而且暂时是「无效草稿」**：SQLite 用例没有任何链路，
+    文档只差 `testpoints`/`sources`，所以 `review list` 会把 8 条 SHOP 草稿标成
+    invalid 并给出 `TRACE_LINK_MISSING`。这是规则 5 的必然结果（正式库不能收无链路的
+    用例），需要人先补测试点/来源再 `qa trace review approve`。迁移不会自动造需求或
+    测试点，也不会因为「想让它看起来绿」而放宽模型。
+39. **迁移只管用例，不管脚本/运行/任务**：`scripts.case_ids` 里存的是旧 `case_*` ID，
+    没有映射到 `automation.script`（脚本绑定需要 `<file>::<nodeid>`，SQLite 里没有
+    nodeid 信息）。执行侧仍读派生索引行，所以迁移后的用例可以被 `qa_run` 按 `TC-*`
+    ID 执行；但「哪条用例由哪个 pytest 函数验证」要人工补绑定。
+40. **索引是派生物，手工改 YAML 后要重建**：读路径只在「该项目有 YAML 但一条派生行
+    都没有」时自愈一次；已经建过索引的项目，外部改文件（编辑器、`git pull`）不会自动
+    反映，必须 `nanobot qa reindex`。这是索引的本分，不是 bug。
+41. **ID 分配是「项目内最大号 + 1」，不是 UUID4**：为了可读的 `TC-SHOP-009`，并发写
+    同一项目可能算出同一个号。文件写入是原子的、加载器会报重名（`TRACE_ID_DUPLICATE`），
+    所以结果是「一条失败」而不是「静默覆盖」；真正的分配台账（`ids/<id>.yaml`）仍在
+    P3 剩余的清单里。
+42. **未迁移的旧行只读**：`legacy: true` 的行可以看、不能被用例库改（409 并提示
+    `qa trace migrate-sqlite`）。这是刻意的过渡态：数据库不再接受新的写入者，旧行保留
+    是为了回滚。
+43. **每次写都全量重建该项目的派生行**：`reindex` 是「删掉 derived=1 的切片再插入」，
+    一次写 = 一次全项目扫描 + 一次批量 INSERT。工作台规模（百级用例）没问题，万级
+    用例需要增量方案（未做）。
+44. **迁移没有批次事务与回滚**：逐文件写入，中途失败会留下已写的一部分用例；重跑会
+    按 `legacy_id` 跳过已写行，所以可以「继续跑完」，但不能「撤销上一次迁移」。删除
+    迁移批次目录即可回到迁移前（SQLite 一行都没被改）。
+45. **归档用例不能再被执行**：`execute_cases --kind` 用 `exclude_deprecated=True`，
+    显式传 `case_ids` 时遇到 `deprecated` 行直接报错；但 `runs/` 里的历史记录仍引用
+    旧 ID（那是事实记录，不回改）。

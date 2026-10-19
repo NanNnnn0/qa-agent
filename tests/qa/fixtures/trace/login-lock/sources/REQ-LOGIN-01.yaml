@@ -1,0 +1,14 @@
+schema_version: 1
+id: REQ-LOGIN-01
+type: req
+module: LOGIN
+title: 连续 5 次登录失败后锁定账号 15 分钟
+evidence:
+  - type: document
+    locator: artifacts/req/login-lock.md#2.1
+    description: 需求文档 2.1「账号锁定策略」：第 5 次失败后锁定 15 分钟并返回 HTTP 423
+    verified: verified_local
+status: active
+confidence: confirmed
+owner: qa.zhang
+note: 演示用需求来源；这是登录锁定链最稳定的一层根节点

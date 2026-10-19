@@ -1,17 +1,25 @@
 """SQLite persistence for the QA platform.
 
-The store is the single source of truth for projects, test cases, automation
-scripts, runs and dispatch tasks. Nothing in this module imports the agent
-runtime, so it is shared by the gateway HTTP API, the built-in tools, the MCP
-server and the test suite.
+Projects, automation scripts, runs and dispatch tasks stay in SQLite.  Test
+cases do not: YAML under the trace project root is their single source of truth
+(``nanobot.qa.case_files``), and the ``cases`` table is a *derived index* rebuilt
+from those files (``derived = 1`` rows, see :meth:`QaStore.replace_derived_cases`).
+Rows written directly through this module (the demo seed, old databases, the
+store-level tests) keep ``derived = 0`` and stay visible until a YAML case with a
+matching ``legacy_id`` replaces them, which is what makes
+``qa trace migrate-sqlite`` a non-destructive move.
+
+Nothing in this module imports the agent runtime, so it is shared by the gateway
+HTTP API, the built-in tools, the MCP server and the test suite.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from nanobot.qa.util import dumps, loads, new_id, utcnow_iso
 from nanobot.qa.validation import (
@@ -37,7 +45,7 @@ from nanobot.qa.validation import (
     validate_steps,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -67,9 +75,11 @@ CREATE TABLE IF NOT EXISTS cases (
     tags TEXT NOT NULL DEFAULT '[]',
     source TEXT NOT NULL DEFAULT 'manual',
     author TEXT NOT NULL DEFAULT '',
+    derived INTEGER NOT NULL DEFAULT 0,
+    legacy_id TEXT NOT NULL DEFAULT '',
+    yaml_path TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (project_id, code)
+    updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cases_project ON cases(project_id);
 CREATE INDEX IF NOT EXISTS idx_cases_kind ON cases(project_id, kind);
@@ -154,6 +164,40 @@ _JSON_SCRIPT_FIELDS = ("case_ids", "tags")
 _JSON_RUN_FIELDS = ("case_ids", "report")
 _JSON_TASK_EVENT_FIELDS = ("data",)
 
+#: Columns of a YAML-derived case row (everything except the timestamps).
+DERIVED_CASE_FIELDS: tuple[str, ...] = (
+    "id",
+    "project_id",
+    "code",
+    "title",
+    "kind",
+    "priority",
+    "status",
+    "preconditions",
+    "steps",
+    "api",
+    "expected",
+    "tags",
+    "source",
+    "author",
+    "legacy_id",
+    "yaml_path",
+)
+
+#: SQL predicate (alias ``c``) for the case rows a reader should see.
+#:
+#: A YAML-derived row is always visible.  A hand-written (legacy) row hides as
+#: soon as a derived row claims it -- by ``legacy_id`` when the migration recorded
+#: the source row, or by ``code`` when the same library is deployed onto a
+#: database that was seeded separately (the codes are the business identity; the
+#: row ids are local).  Rows nobody migrated stay visible, so a seeded database is
+#: never emptied by adding one YAML case.
+_CASE_VISIBLE = (
+    "c.derived = 1 OR NOT EXISTS (SELECT 1 FROM cases d"
+    " WHERE d.project_id = c.project_id AND d.derived = 1"
+    " AND (d.legacy_id = c.id OR (c.code <> '' AND d.code = c.code)))"
+)
+
 _CASE_UPDATE_FIELDS = {
     "title", "kind", "priority", "status", "preconditions", "steps", "api",
     "expected", "tags", "source", "author", "code",
@@ -177,6 +221,28 @@ def _row_to_dict(row: sqlite3.Row, json_fields: Iterable[str] = ()) -> dict[str,
             if field in {"tags", "case_ids"} and data[field] is None:
                 data[field] = []
     return data
+
+
+def _derived_case_values(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return one derived case row as the positional tuple the INSERT expects."""
+    return (
+        row["id"],
+        row["project_id"],
+        row["code"],
+        row["title"],
+        row["kind"],
+        row["priority"],
+        row["status"],
+        row.get("preconditions") or "",
+        dumps(list(row.get("steps") or [])),
+        dumps(dict(row.get("api") or {})),
+        row.get("expected") or "",
+        dumps(list(row.get("tags") or [])),
+        row.get("source") or "manual",
+        row.get("author") or "",
+        row.get("legacy_id") or "",
+        row.get("yaml_path") or "",
+    )
 
 
 class QaStore:
@@ -210,7 +276,73 @@ class QaStore:
             ):
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {ddl}")
+        if version < 3:
+            # YAML became the case source of truth: the table is a derived index.
+            # Pre-existing rows keep derived=0 (they are the rollback copy), and
+            # are hidden only once a YAML case claims them via legacy_id.
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(cases)").fetchall()
+            }
+            for name, ddl in (
+                ("derived", "INTEGER NOT NULL DEFAULT 0"),
+                ("legacy_id", "TEXT NOT NULL DEFAULT ''"),
+                ("yaml_path", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {ddl}")
+            self._drop_case_code_constraint()
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _drop_case_code_constraint(self) -> None:
+        """Rebuild ``cases`` without ``UNIQUE (project_id, code)``.
+
+        A migrated case keeps its human code (``SHOP-API-001``) while the old
+        row that used to own it stays in the table as the rollback copy, so two
+        rows legitimately share one code.  Uniqueness is enforced by the writers
+        (``_resolve_case_code`` / ``case_files._resolve_code``) instead of by the
+        schema.  SQLite cannot drop a constraint in place, so the table is
+        copied: data is preserved and no other table references ``cases``.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cases'"
+        ).fetchone()
+        if row is None or "UNIQUE (project_id, code)" not in str(row[0] or ""):
+            return
+        columns = (
+            "id, project_id, code, title, kind, priority, status, preconditions, steps,"
+            " api, expected, tags, source, author, derived, legacy_id, yaml_path,"
+            " created_at, updated_at"
+        )
+        self._conn.executescript(
+            f"""
+            CREATE TABLE cases_rebuilt (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                code TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'api',
+                priority TEXT NOT NULL DEFAULT 'P1',
+                status TEXT NOT NULL DEFAULT 'draft',
+                preconditions TEXT NOT NULL DEFAULT '',
+                steps TEXT NOT NULL DEFAULT '[]',
+                api TEXT NOT NULL DEFAULT '{{}}',
+                expected TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'manual',
+                author TEXT NOT NULL DEFAULT '',
+                derived INTEGER NOT NULL DEFAULT 0,
+                legacy_id TEXT NOT NULL DEFAULT '',
+                yaml_path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO cases_rebuilt ({columns}) SELECT {columns} FROM cases;
+            DROP TABLE cases;
+            ALTER TABLE cases_rebuilt RENAME TO cases;
+            CREATE INDEX IF NOT EXISTS idx_cases_project ON cases(project_id);
+            CREATE INDEX IF NOT EXISTS idx_cases_kind ON cases(project_id, kind);
+            """
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -323,9 +455,10 @@ class QaStore:
     def list_projects(self) -> list[dict[str, Any]]:
         rows = self._fetchall(
             "SELECT p.*,"
-            " (SELECT COUNT(*) FROM cases c WHERE c.project_id = p.id) AS case_count,"
-            " (SELECT COUNT(*) FROM cases c WHERE c.project_id = p.id AND c.status = 'ready')"
-            "   AS ready_case_count,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.project_id = p.id"
+            f"   AND c.status != 'deprecated' AND ({_CASE_VISIBLE})) AS case_count,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.project_id = p.id"
+            f"   AND c.status = 'ready' AND ({_CASE_VISIBLE})) AS ready_case_count,"
             " (SELECT COUNT(*) FROM scripts s WHERE s.project_id = p.id) AS script_count,"
             " (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id) AS run_count,"
             " (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id"
@@ -351,9 +484,10 @@ class QaStore:
     def project_stats(self, project_id: str) -> dict[str, int]:
         row = self._fetchone(
             "SELECT"
-            " (SELECT COUNT(*) FROM cases WHERE project_id = ?) AS cases,"
-            " (SELECT COUNT(*) FROM cases WHERE project_id = ? AND status = 'ready')"
-            "   AS ready_cases,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.project_id = ?"
+            f"   AND c.status != 'deprecated' AND ({_CASE_VISIBLE})) AS cases,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.project_id = ?"
+            f"   AND c.status = 'ready' AND ({_CASE_VISIBLE})) AS ready_cases,"
             " (SELECT COUNT(*) FROM scripts WHERE project_id = ?) AS scripts,"
             " (SELECT COUNT(*) FROM runs WHERE project_id = ?) AS runs,"
             " (SELECT COUNT(*) FROM tasks WHERE project_id = ?"
@@ -514,28 +648,42 @@ class QaStore:
         kind: str | None = None,
         status: str | None = None,
         query: str | None = None,
+        exclude_deprecated: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
+        """List the case index.
+
+        The result only contains rows a reader should see (see ``_CASE_VISIBLE``);
+        ``exclude_deprecated`` drops archived (tombstoned) cases, which is what a
+        default library listing means now that delete is a tombstone.
+        """
         clauses: list[str] = []
         params: list[Any] = []
         if project_id:
-            clauses.append("project_id = ?")
+            clauses.append("c.project_id = ?")
             params.append(project_id)
         if kind:
-            clauses.append("kind = ?")
+            clauses.append("c.kind = ?")
             params.append(require_enum(kind, "kind", CASE_KINDS))
         if status:
-            clauses.append("status = ?")
+            clauses.append("c.status = ?")
             params.append(require_enum(status, "status", CASE_STATUSES))
+        elif exclude_deprecated:
+            clauses.append("c.status != 'deprecated'")
         if query:
-            clauses.append("(title LIKE ? OR code LIKE ? OR tags LIKE ? OR expected LIKE ?)")
+            clauses.append(
+                "(c.title LIKE ? OR c.code LIKE ? OR c.tags LIKE ? OR c.expected LIKE ?)"
+            )
             pattern = f"%{query}%"
             params.extend([pattern, pattern, pattern, pattern])
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        total_row = self._fetchone(f"SELECT COUNT(*) AS total FROM cases{where}", tuple(params))
+        clauses.append(f"({_CASE_VISIBLE})")
+        where = f" WHERE {' AND '.join(clauses)}"
+        total_row = self._fetchone(
+            f"SELECT COUNT(*) AS total FROM cases c{where}", tuple(params)
+        )
         rows = self._fetchall(
-            f"SELECT * FROM cases{where} ORDER BY code LIMIT ? OFFSET ?",
+            f"SELECT c.* FROM cases c{where} ORDER BY c.code LIMIT ? OFFSET ?",
             (*params, max(1, min(limit, 500)), max(0, offset)),
         )
         return {
@@ -544,6 +692,57 @@ class QaStore:
             "limit": limit,
             "offset": offset,
         }
+
+    def replace_derived_cases(
+        self, project_id: str, rows: Iterable[Mapping[str, Any]]
+    ) -> int:
+        """Replace every YAML-derived case row of one project.
+
+        The whole derived slice is rewritten in one transaction: the YAML files
+        are the source of truth, so a rebuild must not leave a row behind for a
+        case that was renamed or deleted on disk.  Hand-written rows
+        (``derived = 0``) are never touched.
+        """
+        stamp = utcnow_iso()
+        prepared = [
+            (*_derived_case_values(row), row.get("stamp") or stamp)
+            for row in rows
+        ]
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM cases WHERE project_id = ? AND derived = 1", (project_id,)
+            )
+            self._conn.executemany(
+                "INSERT INTO cases (id, project_id, code, title, kind, priority, status,"
+                " preconditions, steps, api, expected, tags, source, author, legacy_id,"
+                " yaml_path, derived, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                [(*values, moment, moment) for *values, moment in prepared],
+            )
+        return len(prepared)
+
+    def case_codes(self, project_id: str) -> set[str]:
+        """Return every case code an index row already uses in one project."""
+        if not project_id:
+            rows = self._fetchall("SELECT code FROM cases")
+        else:
+            rows = self._fetchall(
+                "SELECT code FROM cases WHERE project_id = ?", (project_id,)
+            )
+        return {str(row["code"]).upper() for row in rows if row["code"]}
+
+    def derived_case_ids(self) -> list[str]:
+        """Return every case ID that a YAML document currently owns."""
+        rows = self._fetchall("SELECT id FROM cases WHERE derived = 1")
+        return [str(row["id"]) for row in rows]
+
+    def derived_case_count(self, project_id: str) -> int:
+        """Return how many derived (YAML-owned) case rows a project has."""
+        row = self._fetchone(
+            "SELECT COUNT(*) AS total FROM cases WHERE project_id = ? AND derived = 1",
+            (project_id,),
+        )
+        return int(row["total"]) if row is not None else 0
 
     def export_cases(self, project_id: str | None = None) -> dict[str, Any]:
         project = self.get_project(project_id) if project_id else None
@@ -1077,8 +1276,10 @@ class QaStore:
         counts_row = self._fetchone(
             "SELECT"
             " (SELECT COUNT(*) FROM projects) AS projects,"
-            " (SELECT COUNT(*) FROM cases) AS cases,"
-            " (SELECT COUNT(*) FROM cases WHERE status = 'ready') AS ready_cases,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.status != 'deprecated'"
+            f"   AND ({_CASE_VISIBLE})) AS cases,"
+            f" (SELECT COUNT(*) FROM cases c WHERE c.status = 'ready'"
+            f"   AND ({_CASE_VISIBLE})) AS ready_cases,"
             " (SELECT COUNT(*) FROM scripts) AS scripts,"
             " (SELECT COUNT(*) FROM runs) AS runs,"
             " (SELECT COUNT(*) FROM tasks) AS tasks,"

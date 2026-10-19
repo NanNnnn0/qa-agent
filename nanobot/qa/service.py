@@ -56,9 +56,16 @@ def _resolve_cases(
             case = store.get_case(case_id)
             if case["project_id"] != project_id:
                 raise QaValidationError(f"case '{case_id}' does not belong to this project")
+            if case.get("status") == "deprecated":
+                raise QaValidationError(f"case '{case_id}' is archived and cannot be run")
             cases.append(case)
     else:
-        result = store.list_cases(project_id=project_id, kind=kind, limit=MAX_CASES_PER_RUN)
+        result = store.list_cases(
+            project_id=project_id,
+            kind=kind,
+            exclude_deprecated=True,
+            limit=MAX_CASES_PER_RUN,
+        )
         cases = result["items"]
     if len(cases) > MAX_CASES_PER_RUN:
         raise QaValidationError(f"at most {MAX_CASES_PER_RUN} cases can run at once")

@@ -32,7 +32,14 @@ from .hashing import (
     changed_upstream,
     fingerprint_project,
 )
-from .index import ProjectIndex, load_index, require_compatible, upsert_baseline, write_index
+from .index import (
+    ProjectIndex,
+    load_index,
+    load_index_for_write,
+    require_compatible,
+    upsert_baseline,
+    write_index,
+)
 from .loader import Project
 from .models import ReviewStatus
 
@@ -262,9 +269,20 @@ class StaleReport:
 def compute_stale(
     project: Project, *, write: bool = False, now: str | None = None
 ) -> StaleReport:
-    """Compare the library with the index, optionally recording a new baseline."""
+    """Compare the library with the index, optionally recording a new baseline.
+
+    A read is strict: an unreadable index or one written with another fingerprint
+    recipe is an input error, so a stale baseline never looks like a clean one.
+    ``write=True`` is tolerant instead, because it is the documented way to
+    rebuild such an index.
+    """
     moment = now if now is not None else utc_now()
-    index = require_compatible(load_index(project.root, project_id=project.config.project_id))
+    if write:
+        index = load_index_for_write(project.root, project_id=project.config.project_id)
+    else:
+        index = require_compatible(
+            load_index(project.root, project_id=project.config.project_id)
+        )
     fingerprints = fingerprint_project(project)
     written = False
     recorded = 0

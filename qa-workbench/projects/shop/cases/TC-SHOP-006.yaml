@@ -1,0 +1,39 @@
+schema_version: 1
+id: TC-SHOP-006
+code: SHOP-API-006
+legacy_id: case_b2abe9fd315c
+title: 缺少 qty 时返回参数错误
+testpoints:
+- TP-SHOP-003
+priority: P1
+type: api
+status: reviewed
+steps:
+- action: POST /api/orders
+  expected: 缺少必填参数被拒绝
+automation:
+  status: todo
+expected: 缺少必填参数被拒绝
+api:
+  assertions:
+  - expect: 400
+    type: status
+  - expect: 1000
+    op: equals
+    path: $.code
+    type: json_path
+  request:
+    body:
+      sku: A-1
+    headers:
+      Content-Type: application/json
+    method: POST
+    path: /api/orders
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_b2abe9fd315c
+tags:
+- order
+- negative
+source: ai

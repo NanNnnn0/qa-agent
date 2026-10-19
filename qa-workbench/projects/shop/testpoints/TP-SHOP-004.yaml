@@ -1,0 +1,15 @@
+schema_version: 1
+id: TP-SHOP-004
+module: SHOP
+title: 库存不足拒绝下单（接口与前端一致）
+sources:
+- EX-SHOP-01
+method: state
+risk: high
+status: reviewed
+owner: qa-agent
+tags:
+- shop
+- order
+- inventory
+note: 覆盖 TC-SHOP-003（接口返回 400+1001）与 TC-SHOP-008（前端拦截并停留在购物车）

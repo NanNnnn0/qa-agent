@@ -1,0 +1,44 @@
+schema_version: 1
+id: TC-SHOP-002
+code: SHOP-API-002
+legacy_id: case_0ebe3f67e135
+title: 正常下单返回 201 并生成订单号
+testpoints:
+- TP-SHOP-002
+priority: P0
+type: api
+status: reviewed
+steps:
+- action: POST /api/orders
+  expected: 下单成功，返回订单号
+automation:
+  status: todo
+preconditions: 商品 A-1 库存充足
+expected: 下单成功，返回订单号
+api:
+  assertions:
+  - expect: 201
+    type: status
+  - expect: 0
+    op: equals
+    path: $.code
+    type: json_path
+  - op: exists
+    path: $.data.orderId
+    type: json_path
+  request:
+    body:
+      qty: 2
+      sku: A-1
+    headers:
+      Content-Type: application/json
+    method: POST
+    path: /api/orders
+    query: {}
+  variables: {}
+owner: qa-agent
+note: migrated from the legacy SQLite case case_0ebe3f67e135
+tags:
+- smoke
+- order
+source: ai
