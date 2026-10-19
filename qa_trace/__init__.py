@@ -64,12 +64,14 @@ from .failure import (
 )
 from .graph import TraceGraph, TracePath, build_graph
 from .hashing import (
+    DIGEST_VERSION,
     FINGERPRINT_VERSION,
     Fingerprint,
     canonical_json,
     content_hash,
     fingerprint_project,
     sha256_bytes,
+    sha256_file_digest,
     sha256_text,
 )
 from .ids import (
@@ -175,6 +177,7 @@ __all__ = [
     "DEFAULT_COVERAGE_TOLERANCE",
     "DIFF_VERSION",
     "DRAFT_DIRNAME",
+    "DIGEST_VERSION",
     "FINGERPRINT_VERSION",
     "INDEX_DIRNAME",
     "INDEX_FILENAME",
@@ -305,6 +308,7 @@ __all__ = [
     "scan_markers",
     "scan_project",
     "sha256_bytes",
+    "sha256_file_digest",
     "sha256_text",
     "truncate_error",
     "write_index",

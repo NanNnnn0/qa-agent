@@ -447,6 +447,12 @@
     不扩张，WebUI 的 CSRF/写通道规则不变；审核身份仍是自填的 `reviewer`（与 P4 相同）。
 66. **演示库随仓库提交。** `qa-workbench/projects/shop/` 是真实迁移产物（8 条用例），
     和 `login-lock` 一起作为演示数据；`.qa-trace/` 仍在 gitignore 里，SQLite 库不进仓库。
+67. **manifest 里的文件摘要必须与检出平台无关。** `asset_snapshot` 原来记的是原始字节的
+    sha256，于是在 Windows（CRLF）上生成的 manifest 提交进仓库后，任何人在 Linux（LF）
+    检出都会得到「每个用例都 changed_since_run」，`test_runs_and_failure_trace_the_chain`
+    也随之在别人机器上红。现在摘要先把 CRLF 归一成 LF 再算（`DIGEST_VERSION = 2`，
+    二进制按原字节），快照里写 `digest_version`；没有该字段的旧 manifest 继续按原始字节
+    比较（保持历史行为，不在别人的平台上突然翻成「未变更」）。演示 manifest 因此重新生成。
 
 ## 3. 规则码
 

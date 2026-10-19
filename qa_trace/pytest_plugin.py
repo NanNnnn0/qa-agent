@@ -43,6 +43,7 @@ import pytest
 from . import __version__
 from .diagnostics import from_error
 from .errors import QaTraceError
+from .hashing import DIGEST_VERSION, sha256_file_digest
 from .ids import IdKind, ensure_kind
 from .loader import Project, scan_project
 from .markers import MARKER_NAME
@@ -116,7 +117,7 @@ def _new_run_id(moment: datetime) -> str:
 
 def _sha256(path: Path) -> str | None:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return sha256_file_digest(path.read_bytes())
     except OSError:  # pragma: no cover - a vanished file is not worth failing a run
         return None
 
@@ -166,6 +167,7 @@ def _snapshot_library(project: Project) -> dict[str, Any]:
         return _sha256(path) if path is not None else None
 
     return {
+        "digest_version": DIGEST_VERSION,
         "project_id": project.config.project_id,
         "root": str(project.root),
         "sources": {key: digest(key) for key in sorted(project.sources)},

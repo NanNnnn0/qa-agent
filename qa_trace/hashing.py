@@ -75,6 +75,27 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+#: Digest recipe used for the file hashes frozen into a run manifest.
+#:
+#: A manifest records the library *as it was* when the run started, and the same
+#: repository has to produce the same digests on Windows (CRLF checkout) and on
+#: Linux (LF checkout); hashing raw bytes made every frozen snapshot wrong for
+#: whoever checked the repository out on the other platform.
+DIGEST_VERSION = 2
+
+
+def sha256_file_digest(payload: bytes) -> str:
+    """Return the platform-independent digest of a text file's bytes.
+
+    Line endings are normalised to LF before hashing, so a CRLF and an LF copy of
+    the same document share one digest.  Binary payloads (a NUL in the first 8 KiB)
+    are hashed verbatim: normalising them would corrupt the identity.
+    """
+    if b"\x00" in payload[:8192]:
+        return hashlib.sha256(payload).hexdigest()
+    return hashlib.sha256(payload.replace(b"\r\n", b"\n")).hexdigest()
+
+
 def source_payload(source: Source) -> dict[str, Any]:
     """Return the hashed business fields of a source."""
     return {

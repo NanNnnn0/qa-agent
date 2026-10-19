@@ -30,7 +30,7 @@ from typing import Any
 
 from .errors import RunInvalidError, RunNotFoundError
 from .graph import TraceGraph
-from .hashing import sha256_bytes
+from .hashing import DIGEST_VERSION, sha256_bytes, sha256_file_digest
 from .loader import Project
 from .models import Case, Outcome
 from .staleness import recheck_map
@@ -125,6 +125,15 @@ def _case_digests(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     return cases if isinstance(cases, Mapping) else {}
 
 
+def _digest_version(manifest: Mapping[str, Any]) -> int | None:
+    """Return the digest recipe the manifest was frozen with, if it says so."""
+    snapshot = manifest.get("asset_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    version = snapshot.get("digest_version")
+    return version if isinstance(version, int) else None
+
+
 def _run_summary(manifest: Mapping[str, Any], path: Path) -> dict[str, Any]:
     return {
         "run_id": manifest.get("run_id"),
@@ -208,19 +217,30 @@ def _current_case_state(project: Project, manifest: Mapping[str, Any], case_id: 
             "changed_ids": [],
         }
     recorded = _case_digests(manifest).get(case_id)
+    version = _digest_version(manifest)
     path = project.files.get(case_id)
-    current = None
+    raw: bytes | None = None
     if path is not None:
         try:
-            current = sha256_bytes(path.read_bytes())
+            raw = path.read_bytes()
         except OSError:  # pragma: no cover - the file was just loaded
-            current = None
+            raw = None
+    # A manifest frozen before digest version 2 hashed raw bytes, so it is only
+    # reproducible on the checkout that produced it; keep that comparison for old
+    # manifests and use the line-ending independent digest for new ones.
+    if raw is None:
+        current = None
+    elif version is None or version < DIGEST_VERSION:
+        current = sha256_bytes(raw)
+    elif version == DIGEST_VERSION:
+        current = sha256_file_digest(raw)
+    else:  # pragma: no cover - a manifest from a newer tool
+        current = None
+    comparable = isinstance(recorded, str) and current is not None
     return {
         "exists": True,
         "status": case.status.value,
-        "changed_since_run": (
-            None if not isinstance(recorded, str) or current is None else recorded != current
-        ),
+        "changed_since_run": None if not comparable else recorded != current,
         "needs_recheck": False,
         "reasons": [],
         "changed_ids": [],
