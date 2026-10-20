@@ -2510,6 +2510,43 @@ export async function approveQaTraceReview(
 }
 
 /** Record the rejection of one draft; the file stays in `draft/`. */
+export interface QaTraceReviewBatchOutcome {
+  approved: number;
+  failed: { id: string; error: string }[];
+}
+
+/**
+ * Promote several drafts in one call (`qa.trace.review_approve` with `ids`).
+ *
+ * Every entity is approved on its own, so a blocked draft is reported in
+ * `failed` while the rest still go through.
+ */
+export async function approveQaTraceReviews(
+  transport: QaMutationTransport,
+  input: { ids: string[]; reviewer?: string; note?: string; project?: string },
+): Promise<QaTraceReviewBatchOutcome> {
+  const payload = await mutation<unknown>(
+    transport,
+    "qa.trace.review_approve",
+    compactPayload({
+      ids: input.ids,
+      reviewer: input.reviewer,
+      note: input.note,
+      project: input.project,
+    }),
+  );
+  const record = isRecord(payload) ? payload : {};
+  return {
+    approved: integer(record.approved),
+    failed: Array.isArray(record.failed)
+      ? record.failed.filter(isRecord).map((row) => ({
+          id: text(row.id),
+          error: text(row.error),
+        }))
+      : [],
+  };
+}
+
 export async function rejectQaTraceReview(
   transport: QaMutationTransport,
   input: QaTraceReviewInput,

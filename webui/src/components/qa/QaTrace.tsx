@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   approveQaTraceReview,
+  approveQaTraceReviews,
   loadQaTraceDrafts,
   loadQaTraceFailure,
   loadQaTraceImpact,
@@ -256,6 +257,34 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
       return `${label} ${outcome.id}`;
     });
 
+  const approveAllDrafts = () => {
+    const ids = drafts
+      .filter((draft) => draft.valid && draft.status !== "rejected")
+      .map((draft) => draft.id);
+    if (ids.length === 0) return;
+    void runAction("approve-all", async () => {
+      const outcome = await approveQaTraceReviews(client, {
+        project: projectId || undefined,
+        ids,
+        reviewer: reviewer.trim() || undefined,
+      });
+      if (outcome.failed.length === 0) {
+        return tx("qa.trace.drafts.approvedAll", "已通过 {{count}} 条草稿", {
+          count: outcome.approved,
+        });
+      }
+      return tx(
+        "qa.trace.drafts.approvedSome",
+        "通过 {{approved}} 条，失败 {{failed}} 条：{{reason}}",
+        {
+          approved: outcome.approved,
+          failed: outcome.failed.length,
+          reason: outcome.failed[0]?.error ?? "",
+        },
+      );
+    });
+  };
+
   const projectOptions = useMemo(
     () => projects.map((project) => ({ id: project.id, label: project.name || project.id })),
     [projects],
@@ -397,6 +426,7 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
                 reviewer={reviewer}
                 onReviewerChange={setReviewer}
                 onDecide={decideDraft}
+                onApproveAll={approveAllDrafts}
                 onRetry={draftsQuery.reload}
               />
               <TraceFailurePanel
@@ -956,6 +986,7 @@ function TraceDraftsPanel({
   reviewer,
   onReviewerChange,
   onDecide,
+  onApproveAll,
   onRetry,
 }: {
   drafts: QaTraceDraft[];
@@ -965,12 +996,32 @@ function TraceDraftsPanel({
   reviewer: string;
   onReviewerChange: (value: string) => void;
   onDecide: (draft: QaTraceDraft, approved: boolean) => void;
+  onApproveAll: () => void;
   onRetry: () => void;
 }) {
   const tx = useQaCopy();
   return (
     <QaPanel className="px-4 py-3" testId="qa-trace-drafts">
-      <QaSectionTitle title={tx("qa.trace.drafts.title", "草稿审核")} count={drafts.length} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <QaSectionTitle
+          title={tx("qa.trace.drafts.title", "草稿审核")}
+          count={drafts.length}
+        />
+        {drafts.some((draft) => draft.valid && draft.status !== "rejected") ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 px-2 text-[12px]"
+            onClick={onApproveAll}
+            disabled={Boolean(busy)}
+            data-testid="qa-trace-approve-all"
+          >
+            <Check className="h-3.5 w-3.5" aria-hidden />
+            {tx("qa.trace.drafts.approveAll", "通过本批全部")}
+          </Button>
+        ) : null}
+      </div>
       {error ? (
         <QaErrorBar
           message={`${tx("qa.trace.error.drafts", "加载草稿失败")}: ${error}`}
