@@ -8,6 +8,7 @@ import { loadQaProjects, type QaMutationTransport } from "@/lib/qa-api";
 import { cn } from "@/lib/utils";
 
 import { QaApiAssets } from "./QaApiAssets";
+import { QaTestpoints } from "./QaTestpoints";
 import { QaCaseLibrary } from "./QaCaseLibrary";
 import { QaOverview } from "./QaOverview";
 import { QaRuns } from "./QaRuns";
@@ -22,6 +23,7 @@ export type QaTab =
   | "overview"
   | "tasks"
   | "cases"
+  | "testpoints"
   | "assets"
   | "scripts"
   | "schedules"
@@ -32,6 +34,7 @@ const QA_TABS: QaTab[] = [
   "overview",
   "tasks",
   "cases",
+  "testpoints",
   "assets",
   "scripts",
   "schedules",
@@ -85,6 +88,7 @@ export function QaWorkbench({
     overview: tx("qa.tabs.overview", "概览"),
     tasks: tx("qa.tabs.tasks", "任务板"),
     cases: tx("qa.tabs.cases", "用例库"),
+    testpoints: tx("qa.tabs.testpoints", "测试点"),
     assets: tx("qa.tabs.assets", "接口资产"),
     scripts: tx("qa.tabs.scripts", "自动化"),
     schedules: tx("qa.tabs.schedules", "定时任务"),
@@ -227,6 +231,14 @@ export function QaWorkbench({
                 initialProjectId={scopeProjectId}
                 refreshSignal={refreshSignal}
                 onChanged={refresh}
+              />
+            ) : null}
+            {tab === "testpoints" ? (
+              <QaTestpoints
+                token={token}
+                projects={projects}
+                initialProjectId={scopeProjectId}
+                refreshSignal={refreshSignal}
               />
             ) : null}
             {tab === "assets" ? (

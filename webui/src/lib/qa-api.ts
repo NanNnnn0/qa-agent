@@ -2522,6 +2522,160 @@ export async function rejectQaTraceReview(
   return readEntity(payload, "review", normalizeTraceReviewOutcome);
 }
 
+/** Trace chain: sources and the test points derived from them (ADR 0012). */
+
+export interface QaTraceEvidence {
+  type: string;
+  locator: string;
+  description: string;
+}
+
+export interface QaTraceSource {
+  id: string;
+  type: string;
+  title: string;
+  status: string;
+  confidence: string;
+  module: string | null;
+  owner: string | null;
+  evidence: QaTraceEvidence[];
+  testpoint_count: number;
+}
+
+export interface QaTraceTestpoint {
+  id: string;
+  title: string;
+  sources: string[];
+  method: string;
+  risk: string;
+  status: string;
+  module: string | null;
+  owner: string | null;
+  tags: string[];
+  note: string | null;
+  case_count: number;
+  reviewed_case_count: number;
+}
+
+export interface QaTestpointDraft {
+  batch: string;
+  id: string;
+  kind: string;
+  path: string;
+  status: string;
+  valid: boolean;
+  problems: string[];
+}
+
+export interface QaUnlinkedCase {
+  case_id: string;
+  code: string;
+  title: string;
+  status: string;
+  legacy: boolean;
+}
+
+export interface QaTestpointAssets {
+  project_id: string;
+  root: string;
+  sources: QaTraceSource[];
+  testpoints: QaTraceTestpoint[];
+  drafts: QaTestpointDraft[];
+  unlinked_cases: QaUnlinkedCase[];
+  counts: {
+    sources: number;
+    testpoints: number;
+    drafts: number;
+    unlinked_cases: number;
+    cases: number;
+  };
+}
+
+function normalizeEvidence(value: unknown): QaTraceEvidence[] {
+  return Array.isArray(value)
+    ? value.filter(isRecord).map((item) => ({
+        type: text(item.type),
+        locator: text(item.locator),
+        description: text(item.description),
+      }))
+    : [];
+}
+
+export async function loadQaTestpoints(
+  token: string,
+  projectId: string,
+): Promise<QaTestpointAssets> {
+  const payload = await request<RawRecord>(
+    `/api/qa/testpoints${qaQuery({ project_id: projectId })}`,
+    token,
+  );
+  const sources = Array.isArray(payload.sources)
+    ? payload.sources.filter(isRecord).map((row) => ({
+        id: text(row.id),
+        type: text(row.type),
+        title: text(row.title),
+        status: text(row.status),
+        confidence: text(row.confidence),
+        module: text(row.module) || null,
+        owner: text(row.owner) || null,
+        evidence: normalizeEvidence(row.evidence),
+        testpoint_count: integer(row.testpoint_count),
+      }))
+    : [];
+  const testpoints = Array.isArray(payload.testpoints)
+    ? payload.testpoints.filter(isRecord).map((row) => ({
+        id: text(row.id),
+        title: text(row.title),
+        sources: textList(row.sources),
+        method: text(row.method),
+        risk: text(row.risk),
+        status: text(row.status),
+        module: text(row.module) || null,
+        owner: text(row.owner) || null,
+        tags: textList(row.tags),
+        note: text(row.note) || null,
+        case_count: integer(row.case_count),
+        reviewed_case_count: integer(row.reviewed_case_count),
+      }))
+    : [];
+  const drafts = Array.isArray(payload.drafts)
+    ? payload.drafts.filter(isRecord).map((row) => ({
+        batch: text(row.batch),
+        id: text(row.id),
+        kind: text(row.kind),
+        path: text(row.path),
+        status: text(row.status),
+        valid: row.valid === true,
+        problems: textList(row.problems),
+      }))
+    : [];
+  const unlinked = Array.isArray(payload.unlinked_cases)
+    ? payload.unlinked_cases.filter(isRecord).map((row) => ({
+        case_id: text(row.case_id),
+        code: text(row.code),
+        title: text(row.title),
+        status: text(row.status),
+        legacy: row.legacy === true,
+      }))
+    : [];
+  const counts = isRecord(payload.counts) ? payload.counts : {};
+  return {
+    project_id: text(payload.project_id) || projectId,
+    root: text(payload.root),
+    sources,
+    testpoints,
+    drafts,
+    unlinked_cases: unlinked,
+    counts: {
+      sources: integer(counts.sources, sources.length),
+      testpoints: integer(counts.testpoints, testpoints.length),
+      drafts: integer(counts.drafts, drafts.length),
+      unlinked_cases: integer(counts.unlinked_cases, unlinked.length),
+      cases: integer(counts.cases),
+    },
+  };
+}
+
 // -- API reference assets and case revisions -------------------------------
 
 export interface QaApiOperationEvidence {

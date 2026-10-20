@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import nanobot.qa as qa_package
+from nanobot.qa import shared_store
 from nanobot.agent.tools.qa import (
     QaCaseTool,
     QaOverviewTool,
@@ -56,8 +57,9 @@ async def test_project_tool_rejects_invalid_action() -> None:
     assert str(result).startswith("Error:")
 
 
-async def test_case_tool_bulk_create_and_validation() -> None:
+async def test_case_tool_bulk_create_and_validation(qa_chain) -> None:
     project_id = await _create_project()
+    _, testpoint_id = qa_chain(shared_store(), project_id)
     tool = QaCaseTool()
     payload = _json(await tool.execute(
         "bulk_create",
@@ -90,7 +92,10 @@ async def test_case_tool_bulk_create_and_validation() -> None:
     detail = _json(await tool.execute("get", case_id=case_id))
     assert detail["case"]["api"]["request"]["method"] == "POST"
 
-    updated = _json(await tool.execute("update", case_id=case_id, status="ready"))
+    updated = _json(await tool.execute(
+        "update", case_id=case_id, status="ready",
+        testpoints=[testpoint_id], risk="low",
+    ))
     assert updated["case"]["status"] == "ready"
 
     deleted = _json(await tool.execute("delete", case_id=case_id))
@@ -160,15 +165,18 @@ async def test_dispatch_without_manager_reports_error() -> None:
     assert "subagent manager" in str(result)
 
 
-async def test_run_tool_executes_cases(demo_api: str) -> None:
+async def test_run_tool_executes_cases(demo_api: str, qa_chain) -> None:
     project_id = await _create_project()
     await QaProjectTool().execute("update", project_id=project_id, base_url=demo_api)
+    _, testpoint_id = qa_chain(shared_store(), project_id)
     await QaCaseTool().execute(
         "create",
         project_id=project_id,
         title="products",
         kind="api",
         status="ready",
+        testpoints=[testpoint_id],
+        risk="low",
         api={
             "request": {"method": "GET", "path": "/api/products"},
             "assertions": [{"type": "status", "expect": 200}],
