@@ -359,9 +359,17 @@ def list_assets(store: Any, project_id: str) -> dict[str, Any]:
     listing = list_drafts(directory)
     coverage: dict[str, int] = {}
     reviewed: dict[str, int] = {}
+    covered: dict[str, list[dict[str, Any]]] = {}
     for case in state.cases.values():
         for testpoint_id in case.testpoints:
             coverage[testpoint_id] = coverage.get(testpoint_id, 0) + 1
+            covered.setdefault(testpoint_id, []).append(
+                {
+                    "case_id": case.id,
+                    "title": case.title,
+                    "status": case.status.value,
+                }
+            )
             if case.status.value == "reviewed":
                 reviewed[testpoint_id] = reviewed.get(testpoint_id, 0) + 1
     testpoints = [
@@ -378,6 +386,7 @@ def list_assets(store: Any, project_id: str) -> dict[str, Any]:
             "note": item.note,
             "case_count": coverage.get(item.id, 0),
             "reviewed_case_count": reviewed.get(item.id, 0),
+            "cases": covered.get(item.id, []),
         }
         for item in sorted(state.testpoints.values(), key=lambda row: row.id)
     ]

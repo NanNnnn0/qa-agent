@@ -2592,6 +2592,7 @@ export interface QaTraceTestpoint {
   note: string | null;
   case_count: number;
   reviewed_case_count: number;
+  cases: { case_id: string; title: string; status: string }[];
 }
 
 export interface QaTestpointDraft {
@@ -2673,6 +2674,13 @@ export async function loadQaTestpoints(
         note: text(row.note) || null,
         case_count: integer(row.case_count),
         reviewed_case_count: integer(row.reviewed_case_count),
+        cases: Array.isArray(row.cases)
+          ? row.cases.filter(isRecord).map((item) => ({
+              case_id: text(item.case_id),
+              title: text(item.title),
+              status: text(item.status),
+            }))
+          : [],
       }))
     : [];
   const drafts = Array.isArray(payload.drafts)

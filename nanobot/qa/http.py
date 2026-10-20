@@ -113,6 +113,22 @@ _CASE_WRITE_FIELDS = frozenset({
 
 
 
+def _reindex_after_review(store: QaStore) -> None:
+    """Rebuild the derived case index after a trace review.
+
+    Approving a draft moves its file from ``draft/`` to ``cases/``; the derived
+    rows keep the old path until something reindexes, and the case library would
+    keep showing the case as an unlinked draft. The review already succeeded, so
+    a reindex failure is logged instead of failing the request.
+    """
+    try:
+        from nanobot.qa.case_files import reindex_cases
+
+        reindex_cases(store)
+    except Exception:  # pragma: no cover - the write already succeeded
+        logger.warning("qa cases: reindex after review failed", exc_info=True)
+
+
 def _error(status: int, message: str) -> Response:
     return _json({"ok": False, "error": message}, status=status)
 
@@ -342,9 +358,13 @@ class QaApi:
             if path == "/api/qa/trace/stale/write":
                 return _ok(await asyncio.to_thread(trace.stale_write, payload))
             if path == "/api/qa/trace/review/approve":
-                return _ok(await asyncio.to_thread(trace.review_approve, payload))
+                result = await asyncio.to_thread(trace.review_approve, payload)
+                _reindex_after_review(store)
+                return _ok(result)
             if path == "/api/qa/trace/review/reject":
-                return _ok(await asyncio.to_thread(trace.review_reject, payload))
+                result = await asyncio.to_thread(trace.review_reject, payload)
+                _reindex_after_review(store)
+                return _ok(result)
             return _error(404, "QA trace mutation route not found")
         if path == "/api/qa/projects/create":
             project = store.create_project(
