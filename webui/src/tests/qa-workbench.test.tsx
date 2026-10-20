@@ -564,6 +564,26 @@ describe("QA workbench", () => {
     });
   });
 
+  it("deletes a project with qa.project.delete after confirmation", async () => {
+    const user = userEvent.setup();
+    const { requestMutation } = renderWorkbench();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qa-count-cases")).toHaveTextContent("12");
+    });
+    await user.click(screen.getByTestId("qa-project-delete"));
+    const dialog = await screen.findByTestId("qa-project-delete-dialog");
+    await user.click(within(dialog).getByTestId("qa-project-delete-confirm"));
+
+    await waitFor(() => {
+      expect(requestMutation).toHaveBeenCalledWith(
+        "qa.project.delete",
+        { id: "proj-1" },
+        expect.any(Number),
+      );
+    });
+  });
+
   it("edits an existing project with qa.project.update", async () => {
     const user = userEvent.setup();
     const { requestMutation } = renderWorkbench();

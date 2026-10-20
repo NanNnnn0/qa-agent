@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Pencil, Plus } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { usePageVisibility } from "@/hooks/usePageVisibility";
 import {
   createQaProject,
+  deleteQaProject,
   loadQaOverview,
   qaErrorMessage,
   updateQaProject,
@@ -69,11 +70,30 @@ export function QaOverview({
   const visible = usePageVisibility();
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<QaProject | null>(null);
+  const [deletingProject, setDeletingProject] = useState<QaProject | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const overview = useQaQuery(
     () => loadQaOverview(token),
     [token, refreshSignal],
     { intervalMs: visible ? pollIntervalMs : 0 },
   );
+
+  const confirmDeleteProject = async () => {
+    if (!deletingProject || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
+    try {
+      await deleteQaProject(client, deletingProject.id);
+      setDeletingProject(null);
+      onReloadProjects();
+      overview.reload();
+    } catch (reason) {
+      setDeleteError(qaErrorMessage(reason));
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
 
   const counts = overview.data?.counts;
   const projectRows = projects.length > 0 ? projects : (overview.data?.projects ?? []);
@@ -261,6 +281,18 @@ export function QaOverview({
                       <Pencil className="h-3.5 w-3.5" aria-hidden />
                       {tx("qa.overview.projectEditShort", "编辑")}
                     </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 gap-1 px-2 text-[12px] text-destructive"
+                      aria-label={`${tx("qa.overview.projectDelete", "删除项目")} ${project.key}`}
+                      data-testid="qa-project-delete"
+                      onClick={() => setDeletingProject(project)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                      {tx("qa.overview.projectDeleteShort", "删除")}
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -372,6 +404,45 @@ export function QaOverview({
         onOpenChange={setProjectDialogOpen}
         onSaved={onReloadProjects}
       />
+
+      <Dialog
+        open={deletingProject !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeletingProject(null);
+        }}
+      >
+        <DialogContent className="max-w-sm" data-testid="qa-project-delete-dialog">
+          <DialogHeader>
+            <DialogTitle>{tx("qa.overview.projectDelete", "删除项目")}</DialogTitle>
+            <DialogDescription>
+              {tx(
+                "qa.overview.projectDeleteHint",
+                "项目下的用例、脚本、运行记录、任务和定时任务会一并删除，且不可撤销。",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError ? <QaErrorBar message={deleteError} /> : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setDeletingProject(null)}
+              disabled={deleteBusy}
+            >
+              {tx("qa.actions.cancel", "取消")}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              data-testid="qa-project-delete-confirm"
+              disabled={deleteBusy}
+              onClick={() => void confirmDeleteProject()}
+            >
+              {tx("qa.overview.projectDeleteConfirm", "确认删除")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <QaProjectDialog
         client={client}
