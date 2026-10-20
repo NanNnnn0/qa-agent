@@ -1001,6 +1001,9 @@ function TraceDraftsPanel({
           <ul className="flex flex-col gap-2">
             {drafts.map((draft) => {
               const rejected = draft.status === "rejected";
+              const needsLink = draft.problems.some((problem) =>
+                problem.includes("TRACE_LINK_MISSING"),
+              );
               const approving = busy === `approve:${draft.id}`;
               const rejecting = busy === `reject:${draft.id}`;
               return (
@@ -1032,7 +1035,7 @@ function TraceDraftsPanel({
                       size="sm"
                       className="h-7 gap-1 px-2 text-[12px]"
                       onClick={() => onDecide(draft, true)}
-                      disabled={Boolean(busy) || rejected}
+                      disabled={Boolean(busy) || rejected || !draft.valid}
                       data-testid={`qa-trace-approve-${draft.id}`}
                     >
                       <Check className="h-3.5 w-3.5" aria-hidden />
@@ -1054,6 +1057,14 @@ function TraceDraftsPanel({
                   <p className="mt-1 truncate text-[11px] text-muted-foreground" title={draft.path}>
                     {draft.path}
                   </p>
+                  {needsLink ? (
+                    <p className="mt-1 text-[11px] text-amber-600">
+                      {tx(
+                        "qa.trace.drafts.needsLink",
+                        "这条用例还没有测试点。先让 Agent 用 qa_testpoint action=attach 挂上测试点（或先建一条测试点），再回来通过。",
+                      )}
+                    </p>
+                  ) : null}
                   {draft.problems.length > 0 ? (
                     <ul className="mt-1 flex flex-col gap-0.5">
                       {draft.problems.map((problem) => (
