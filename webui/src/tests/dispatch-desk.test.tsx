@@ -291,3 +291,30 @@ describe("dispatch desk click path", () => {
     expect(screen.getByRole("button", { name: "全部任务" })).toBeInTheDocument();
   });
 });
+
+describe("dispatch sticky note", () => {
+  it("stays collapsed and expands to its artifacts", () => {
+    const onOpen = vi.fn();
+    const bound = task({
+      id: "sticky",
+      status: "running",
+      artifacts: [{
+        id: "artifact-1",
+        title: "检查清单",
+        summary: "主路径、空状态与失败",
+        fileName: "checklist.md",
+        language: "markdown",
+        content: "# checklist",
+        source: "local-desk",
+      }],
+    });
+    render(<DispatchTaskView task={bound} onOpenArtifact={onOpen} variant="sticky" />);
+
+    expect(screen.getByTestId("dispatch-task-view")).toHaveAttribute("data-variant", "sticky");
+    expect(screen.queryByRole("button", { name: /Open/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("dispatch-sticky-toggle"));
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+    expect(onOpen).toHaveBeenCalledWith("artifact-1");
+  });
+});

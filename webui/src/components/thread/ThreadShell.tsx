@@ -2136,8 +2136,17 @@ export function ThreadShell({
         ) : null}
         {headerPortalTarget === undefined ? threadHeader : null}
         {boundTask && displayMessages.length > 0 ? (
-          <div className="shrink-0 border-b border-border/60 px-4 py-3">
-            <DispatchTaskView task={boundTask} onOpenArtifact={setOpenArtifactId} />
+          <div
+            className={cn(
+              "pointer-events-none absolute left-3 z-20 w-[17rem] max-w-[calc(100%-1.5rem)]",
+              hideHeader ? "top-3" : "top-14",
+            )}
+          >
+            <DispatchTaskView
+              task={boundTask}
+              onOpenArtifact={setOpenArtifactId}
+              variant="sticky"
+            />
           </div>
         ) : null}
         <FilePreviewAvailabilityProvider

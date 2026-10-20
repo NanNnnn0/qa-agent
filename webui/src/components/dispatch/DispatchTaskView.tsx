@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ListChecks, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ListChecks, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { FilePreviewPanelView } from "@/components/FilePreviewPanelView";
@@ -57,12 +57,95 @@ export function DispatchHomeExtras({
 export function DispatchTaskView({
   task,
   onOpenArtifact,
+  variant = "inline",
 }: {
   task: DispatchTask;
   onOpenArtifact: (artifactId: string) => void;
+  variant?: "inline" | "sticky";
 }) {
   const desk = useDispatchDesk();
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  if (variant === "sticky") {
+    return (
+      <div
+        data-testid="dispatch-task-view"
+        data-variant="sticky"
+        className="pointer-events-auto w-full overflow-hidden rounded-xl border border-amber-300/60 bg-amber-50/95 text-left shadow-md backdrop-blur dark:border-amber-400/25 dark:bg-amber-500/10"
+      >
+        <button
+          type="button"
+          aria-expanded={expanded}
+          data-testid="dispatch-sticky-toggle"
+          onClick={() => setExpanded((current) => !current)}
+          className="flex w-full items-center gap-2 px-3 py-2"
+        >
+          <DispatchStatusDot status={task.status} />
+          <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+            {task.title}
+          </span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            {t(`dispatch.status.${task.status}`)}
+          </span>
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          )}
+        </button>
+        {expanded ? (
+          <div className="max-h-64 overflow-y-auto border-t border-amber-300/40 px-3 py-2">
+            <p className="text-[11.5px] text-muted-foreground">
+              {t(`dispatch.progress.${task.status}`)}
+            </p>
+            <ul className="mt-2 space-y-1.5">
+              {task.artifacts.map((artifact) => (
+                <li
+                  key={artifact.id}
+                  className="flex items-start gap-2 rounded-md border border-border/60 bg-card/70 px-2 py-1.5"
+                >
+                  <ListChecks className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[12px] font-medium text-foreground">
+                      {artifact.title}
+                    </div>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {artifact.summary}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 shrink-0 px-1.5 text-[11px]"
+                    aria-label={t("dispatch.openArtifact", { title: artifact.title })}
+                    onClick={() => onOpenArtifact(artifact.id)}
+                  >
+                    {t("dispatch.open")}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+            {!task.sessionKey && desk ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="mt-2 h-6 px-1.5 text-[11px]"
+                onClick={desk.clearFocus}
+              >
+                {t("dispatch.back")}
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="px-3 pb-2 text-[11px] text-muted-foreground">
+            {t("dispatch.artifacts")} · {task.artifacts.length}
+          </p>
+        )}
+      </div>
+    );
+  }
   return (
     <div data-testid="dispatch-task-view" className="flex w-full max-w-[40rem] flex-col items-stretch gap-4 text-left">
       <div className="flex items-center gap-2">
