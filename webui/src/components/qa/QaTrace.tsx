@@ -1101,7 +1101,7 @@ function TraceDraftsPanel({
             data-testid="qa-trace-reviewer"
           />
           <ul className="flex flex-col gap-2">
-            {drafts.map((draft) => {
+            {drafts.slice(0, 5).map((draft) => {
               const rejected = draft.status === "rejected";
               const needsLink = draft.problems.some((problem) =>
                 problem.includes("TRACE_LINK_MISSING"),
@@ -1195,6 +1195,13 @@ function TraceDraftsPanel({
               );
             })}
           </ul>
+          {drafts.length > 5 ? (
+            <p className="text-[11.5px] text-muted-foreground" data-testid="qa-trace-drafts-more">
+              {tx("qa.trace.drafts.more", "还有 {{count}} 条，通过一条就会补上一条", {
+                count: drafts.length - 5,
+              })}
+            </p>
+          ) : null}
         </div>
       )}
     </QaPanel>

@@ -10,6 +10,7 @@ import {
 import { loadQaTestpoints, type QaProject } from "@/lib/qa-api";
 import { cn } from "@/lib/utils";
 
+import { QaDetailDrawer, QaDetailSection } from "./QaDetailDrawer";
 import {
   QaBadge,
   QaEmptyState,
@@ -57,6 +58,7 @@ export function QaTestpoints({
 }) {
   const tx = useQaCopy();
   const [projectId, setProjectId] = useState(initialProjectId);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const resolved = projectId === "all" ? (projects[0]?.id ?? "") : projectId;
 
   const query = useQaQuery(
@@ -70,6 +72,7 @@ export function QaTestpoints({
 
   const data = query.data;
   const counts = data?.counts;
+  const selected = data?.testpoints.find((item) => item.id === selectedId) ?? null;
   const sourceTitles = new Map(
     (data?.sources ?? []).map((source) => [source.id, source.title || source.id]),
   );
@@ -214,7 +217,12 @@ export function QaTestpoints({
                 </thead>
                 <tbody>
                   {data.testpoints.map((testpoint) => (
-                    <tr key={testpoint.id} data-testid={`qa-testpoint-${testpoint.id}`}>
+                    <tr
+                      key={testpoint.id}
+                      data-testid={`qa-testpoint-${testpoint.id}`}
+                      onClick={() => setSelectedId(testpoint.id)}
+                      className="cursor-pointer transition-colors hover:bg-accent/40"
+                    >
                       <td className={cn(QA_TD_CLASS, "font-mono text-[12px] text-muted-foreground")}>
                         {testpoint.id}
                       </td>
@@ -305,6 +313,82 @@ export function QaTestpoints({
           ) : null}
         </>
       )}
+      <QaDetailDrawer
+        open={Boolean(selectedId)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedId(null);
+        }}
+        testId="qa-testpoint-drawer"
+        title={selected ? `${selected.id}` : ""}
+        description={selected?.title ?? ""}
+        badge={
+          selected ? (
+            <QaBadge tone={RISK_TONE[selected.risk] ?? "neutral"}>{selected.risk}</QaBadge>
+          ) : null
+        }
+        meta={
+          selected
+            ? [
+                { label: tx("qa.testpoints.method", "方法"), value: selected.method },
+                { label: tx("qa.testpoints.status", "状态"), value: selected.status },
+                {
+                  label: tx("qa.testpoints.owner", "负责人"),
+                  value: selected.owner || "—",
+                },
+                {
+                  label: tx("qa.testpoints.tags", "标签"),
+                  value: selected.tags.join(", ") || "—",
+                  mono: true,
+                },
+              ]
+            : []
+        }
+      >
+        {selected ? (
+          <>
+            <QaDetailSection
+              title={tx("qa.testpoints.sources", "来源")}
+              hint={String(selected.sources.length)}
+            >
+              <ul className="flex flex-col gap-1 text-[12px]">
+                {selected.sources.map((id) => (
+                  <li key={id} className="rounded-lg border border-border/60 bg-card px-2.5 py-1.5">
+                    <span className="text-[11px] text-muted-foreground">
+                      {sourceTitles.get(id) ?? id}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </QaDetailSection>
+            <QaDetailSection
+              title={tx("qa.testpoints.covered", "覆盖用例")}
+              hint={String(selected.cases.length)}
+            >
+              {selected.cases.length === 0 ? (
+                <p className="text-[12px] text-muted-foreground">
+                  {tx("qa.testpoints.noCovered", "还没有用例挂到这个测试点")}
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-1 text-[12px]">
+                  {selected.cases.map((item) => (
+                    <li key={item.case_id} className="flex items-center gap-2">
+                      <span className="font-mono text-[11.5px] text-muted-foreground">
+                        {item.case_id}
+                      </span>
+                      <span className="flex-1 truncate">{item.title}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </QaDetailSection>
+            {selected.note ? (
+              <QaDetailSection title={tx("qa.testpoints.note", "备注")}>
+                <p className="whitespace-pre-wrap text-[12.5px]">{selected.note}</p>
+              </QaDetailSection>
+            ) : null}
+          </>
+        ) : null}
+      </QaDetailDrawer>
     </div>
   );
 }
