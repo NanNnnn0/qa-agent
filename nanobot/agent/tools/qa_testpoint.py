@@ -69,6 +69,10 @@ def _dumps(payload: Any) -> str:
             enum=("observed", "confirmed"),
         ),
         module=StringSchema("Module segment of the generated id (default: the project key)."),
+        group=StringSchema(
+            "entity=testpoint: where it sits in the product, as a 模块/页面 breadcrumb, "
+            "e.g. \"登录模块/注册界面\". Groups the workbench list; ids stay global."
+        ),
         owner=StringSchema("Owner recorded on the entity."),
         note=StringSchema("Free-form note."),
         tags=ArraySchema(StringSchema(""), description="entity=testpoint: tags."),
@@ -128,6 +132,7 @@ class QaTestpointTool(Tool):
         risk: str | None = None,
         confidence: str | None = None,
         module: str | None = None,
+        group: str | None = None,
         owner: str | None = None,
         note: str | None = None,
         tags: list[str] | None = None,
@@ -175,6 +180,7 @@ class QaTestpointTool(Tool):
                         method=method or "equivalence",
                         risk=risk or "medium",
                         module=module,
+                        group=group,
                         owner=owner or "agent",
                         tags=tags,
                         note=note,

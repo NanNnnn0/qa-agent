@@ -32,6 +32,7 @@ from qa_trace.caseyaml import case_module
 from qa_trace.drafts import add_draft, list_drafts
 from qa_trace.errors import QaTraceError
 from qa_trace.ids import IdKind, new_id
+from qa_trace.labels import testpoint_codes
 from qa_trace.loader import load_project
 from qa_trace.models import (
     EvidenceType,
@@ -62,6 +63,27 @@ _SOURCE_ID_KINDS = {
 }
 
 MAX_TESTPOINTS_PER_CASE = 3
+
+#: A group is the ``模块/页面`` breadcrumb a person navigates by, not an id.
+MAX_GROUP_LEVELS = 4
+_GROUP_SEPARATORS = (">", "/", "／", "＞", "\\")
+
+
+def normalize_group(value: Any) -> str | None:
+    """Normalise a ``模块/页面`` breadcrumb: trimmed, single separators, no empties."""
+    text = optional_text(value, "group", max_length=200).strip()
+    if not text:
+        return None
+    for separator in _GROUP_SEPARATORS:
+        text = text.replace(separator, "/")
+    levels = [level.strip() for level in text.split("/") if level.strip()]
+    if not levels:
+        return None
+    if len(levels) > MAX_GROUP_LEVELS:
+        raise QaValidationError(
+            f"group has at most {MAX_GROUP_LEVELS} levels (e.g. 登录模块/注册界面)"
+        )
+    return "/".join(levels)
 
 
 def project_module(project: dict[str, Any]) -> str:
@@ -200,6 +222,7 @@ def create_testpoint(
     method: str = "equivalence",
     risk: str = "medium",
     module: str | None = None,
+    group: str | None = None,
     owner: str = "agent",
     tags: Any = None,
     note: str | None = None,
@@ -249,6 +272,9 @@ def create_testpoint(
         document["tags"] = tag_values
     if note:
         document["note"] = optional_text(note, "note", max_length=2000)
+    group_path = normalize_group(group)
+    if group_path:
+        document["group"] = group_path
     try:
         TestPoint.from_dict(document)
     except QaTraceError as exc:
@@ -366,15 +392,19 @@ def list_assets(store: Any, project_id: str) -> dict[str, Any]:
             covered.setdefault(testpoint_id, []).append(
                 {
                     "case_id": case.id,
+                    "code": case.code or "",
                     "title": case.title,
                     "status": case.status.value,
                 }
             )
             if case.status.value == "reviewed":
                 reviewed[testpoint_id] = reviewed.get(testpoint_id, 0) + 1
+    codes = testpoint_codes(state.testpoints.values())
     testpoints = [
         {
             "id": item.id,
+            "code": codes.get(item.id, ""),
+            "group": item.group,
             "title": item.title,
             "sources": list(item.sources),
             "method": item.method.value,
@@ -388,7 +418,9 @@ def list_assets(store: Any, project_id: str) -> dict[str, Any]:
             "reviewed_case_count": reviewed.get(item.id, 0),
             "cases": covered.get(item.id, []),
         }
-        for item in sorted(state.testpoints.values(), key=lambda row: row.id)
+        for item in sorted(
+            state.testpoints.values(), key=lambda row: (row.group or "", row.id)
+        )
     ]
     sources = [
         {

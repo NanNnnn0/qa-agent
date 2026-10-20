@@ -74,6 +74,20 @@ async def _formal_chain(project_id: str) -> tuple[str, str]:
     return source["id"], testpoint["id"]
 
 
+def _project_sync() -> str:
+    """Create a project through the tool without an event loop."""
+    import asyncio
+
+    return asyncio.run(_project())
+
+
+def sync_case_create(**fields: Any) -> Any:
+    """Run the case tool synchronously (the tool itself is async)."""
+    import asyncio
+
+    return asyncio.run(QaCaseTool().execute("create", **fields))
+
+
 async def test_source_draft_is_written_under_the_agent_batch() -> None:
     project_id = await _project()
     created = await QaTestpointTool().execute(
@@ -208,3 +222,123 @@ async def test_list_assets_reports_sources_and_drafts() -> None:
         )
     )
     assert sources["count"] == 0  # still a draft, not formal yet
+
+def _grouped_chain(project_id: str) -> tuple[str, str]:
+    """Approve a source and one grouped test point under it."""
+    store = shared_store()
+    source = testpoints.create_source(
+        store,
+        project_id,
+        source_type="api",
+        title="register contract",
+        evidence=EVIDENCE,
+        confidence="confirmed",
+    )
+    approve(_directory(project_id), source["id"], reviewer="qa")
+    testpoint = testpoints.create_testpoint(
+        store,
+        project_id,
+        title="username boundary",
+        sources=[source["id"]],
+        method="boundary",
+        risk="low",
+        group=" 登录模块 / 注册界面 ",
+        note="2 字符和 20 字符都能注册成功",
+    )
+    approve(_directory(project_id), testpoint["id"], reviewer="qa")
+    return source["id"], testpoint["id"]
+
+
+def test_group_is_normalised_and_listed_with_a_readable_code() -> None:
+    project_id = _project_sync()
+    source = testpoints.create_source(
+        shared_store(),
+        project_id,
+        source_type="api",
+        title="register contract",
+        evidence=EVIDENCE,
+        confidence="confirmed",
+    )
+    approve(_directory(project_id), source["id"], reviewer="qa")
+    first = testpoints.create_testpoint(
+        shared_store(),
+        project_id,
+        title="username boundary",
+        sources=[source["id"]],
+        group=" 登录模块 / 注册界面 ",
+    )
+    approve(_directory(project_id), first["id"], reviewer="qa")
+    second = testpoints.create_testpoint(
+        shared_store(),
+        project_id,
+        title="login smoke",
+        sources=[source["id"]],
+        group="登录模块>登录界面",
+    )
+    approve(_directory(project_id), second["id"], reviewer="qa")
+
+    assets = testpoints.list_assets(shared_store(), project_id)
+    by_id = {item["id"]: item for item in assets["testpoints"]}
+    assert by_id[first["id"]]["group"] == "登录模块/注册界面"
+    assert by_id[second["id"]]["group"] == "登录模块/登录界面"
+    # Codes are display-only ordinals in id order; the trace id stays the key.
+    ordered = sorted(by_id, key=lambda item: item)
+    assert [by_id[item]["code"] for item in ordered] == ["TP-01", "TP-02"]
+    assert by_id[first["id"]]["id"].startswith("TP-CHAIN-")
+    # Stable across reads: the ordinal is derived, never stored.
+    again = testpoints.list_assets(shared_store(), project_id)
+    assert {item["id"]: item["code"] for item in again["testpoints"]} == {
+        item: by_id[item]["code"] for item in by_id
+    }
+
+
+def test_group_rejects_too_many_levels() -> None:
+    with pytest.raises(QaValidationError) as error:
+        testpoints.normalize_group("a/b/c/d/e")
+    assert "at most 4 levels" in str(error.value)
+
+
+def test_case_payload_inherits_the_group_and_sources_of_its_testpoint() -> None:
+    project_id = _project_sync()
+    source_id, testpoint_id = _grouped_chain(project_id)
+    created = _json(
+        sync_case_create(
+            project_id=project_id,
+            title="username 2 chars",
+            kind="api",
+            status="ready",
+            testpoints=[testpoint_id],
+        )
+    )
+    case_id = created["case"]["id"]
+    payload = CaseFiles(shared_store()).get_case(case_id)
+    assert payload["group"] == "登录模块/注册界面"
+    assert payload["sources"] == []  # nothing linked directly
+    assert [item["id"] for item in payload["trace_sources"]] == [source_id]
+    assert payload["trace_sources"][0]["direct"] is False
+    assert payload["trace_sources"][0]["title"] == "register contract"
+    assert payload["trace_testpoints"][0]["id"] == testpoint_id
+    assert payload["trace_testpoints"][0]["code"] == "TP-01"
+    assert payload["trace_testpoints"][0]["title"] == "username boundary"
+
+    listed = CaseFiles(shared_store()).list_cases(project_id=project_id)["items"][0]
+    assert listed["group"] == "登录模块/注册界面"
+    assert [item["id"] for item in listed["trace_sources"]] == [source_id]
+
+
+def test_covered_cases_carry_their_human_code() -> None:
+    project_id = _project_sync()
+    _, testpoint_id = _grouped_chain(project_id)
+    created = _json(
+        sync_case_create(
+            project_id=project_id,
+            title="username 2 chars",
+            kind="api",
+            status="ready",
+            testpoints=[testpoint_id],
+        )
+    )
+    assets = testpoints.list_assets(shared_store(), project_id)
+    covered = assets["testpoints"][0]["cases"][0]
+    assert covered["case_id"] == created["case"]["id"]
+    assert covered["code"].startswith("CHAIN-API-")

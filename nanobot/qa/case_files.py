@@ -79,6 +79,7 @@ from qa_trace.errors import IdError, QaTraceError
 from qa_trace.hashing import fingerprint_project
 from qa_trace.ids import SOURCE_KINDS, IdKind, parse_id
 from qa_trace.index import load_index_for_write, upsert_review, write_index
+from qa_trace.labels import testpoint_codes
 from qa_trace.loader import load_project
 from qa_trace.models import Case
 from qa_trace.staleness import recheck_map
@@ -242,6 +243,7 @@ class CaseFiles:
         needs_recheck: bool = False,
         recheck_reasons: Sequence[str] = (),
         legacy: bool = False,
+        trace: Any = None,
     ) -> dict[str, Any]:
         """Return the legacy-shaped case object plus the trace badges."""
         document = document or {}
@@ -258,6 +260,46 @@ class CaseFiles:
         )
         binding = automation.get("script") if isinstance(automation, Mapping) else None
         yaml_path = str(row.get("yaml_path") or "")
+        # The chain, resolved: a case hangs off test points, and a test point
+        # hangs off sources.  The badge has to show the transitive roots or a
+        # perfectly linked case still reads "missing source" (ADR 0012).
+        trace_testpoints: list[dict[str, Any]] = []
+        trace_sources: list[dict[str, Any]] = []
+        group = document.get("group") if isinstance(document.get("group"), str) else None
+        if trace is not None:
+            codes = testpoint_codes(trace.testpoints.values())
+            reachable = list(sources)
+            for testpoint_id in testpoints:
+                testpoint = trace.testpoints.get(testpoint_id)
+                if testpoint is None:
+                    continue
+                trace_testpoints.append(
+                    {
+                        "id": testpoint.id,
+                        "code": codes.get(testpoint.id, ""),
+                        "title": testpoint.title,
+                        "group": testpoint.group,
+                        "risk": testpoint.risk.value,
+                    }
+                )
+                group = group or testpoint.group
+                for source_id in testpoint.sources:
+                    if source_id not in reachable:
+                        reachable.append(source_id)
+            for source_id in reachable:
+                source = trace.sources.get(source_id)
+                trace_sources.append(
+                    {
+                        "id": source_id,
+                        "title": source.title if source is not None else "",
+                        "type": source.type.value if source is not None else "",
+                        "direct": source_id in sources,
+                    }
+                )
+        else:
+            trace_sources = [
+                {"id": item, "title": "", "type": "", "direct": True} for item in sources
+            ]
         draft = yaml_path.startswith("draft/")
         batch = yaml_path.split("/")[1] if draft and yaml_path.count("/") >= 2 else None
         payload: dict[str, Any] = {
@@ -287,6 +329,9 @@ class CaseFiles:
             ),
             "testpoints": testpoints,
             "sources": sources,
+            "group": group or None,
+            "trace_testpoints": trace_testpoints,
+            "trace_sources": trace_sources,
             "direct_reason": document.get("direct_reason"),
             "risk": document.get("risk"),
             "owner": document.get("owner"),
@@ -303,15 +348,30 @@ class CaseFiles:
         }
         return payload
 
-    def _recheck_map_for(self, project: Mapping[str, Any]) -> dict[str, Any]:
-        """Return the hash-based re-check map of a project (empty when unreadable)."""
+    def _trace_for(self, project: Mapping[str, Any]) -> Any:
+        """Return the project's loaded trace library, or ``None`` when unreadable."""
         directory = self.project_dir(project)
         try:
-            library = load_project(directory)
+            return load_project(directory)
+        except QaTraceError as exc:
+            logger.debug(
+                "qa cases: trace library unavailable for {}: {}", directory, exc.format()
+            )
+            return None
+
+    def _rechecks_for(self, library: Any) -> dict[str, Any]:
+        """Return the hash-based re-check map of one loaded library."""
+        if library is None:
+            return {}
+        try:
             return recheck_map(library, build_graph(library))
         except QaTraceError as exc:
-            logger.debug("qa cases: recheck map unavailable for {}: {}", directory, exc.format())
+            logger.debug("qa cases: recheck map unavailable: {}", exc.format())
             return {}
+
+    def _recheck_map_for(self, project: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the hash-based re-check map of a project (empty when unreadable)."""
+        return self._rechecks_for(self._trace_for(project))
 
     def _legacy_payload(self, row: Mapping[str, Any]) -> dict[str, Any]:
         """Return a hand-written SQLite row (read-only until it is migrated)."""
@@ -380,13 +440,14 @@ class CaseFiles:
         project = self.store.get_project(row["project_id"])
         directory = self.project_dir(project)
         document = self._document(row, directory)
-        rechecks = self._recheck_map_for(project)
-        recheck = rechecks.get(case_id)
+        trace = self._trace_for(project)
+        recheck = self._rechecks_for(trace).get(case_id)
         return self._case_payload(
             row,
             document=document,
             needs_recheck=recheck is not None,
             recheck_reasons=list(recheck.reasons) if recheck is not None else (),
+            trace=trace,
         )
 
     def list_cases(
@@ -419,11 +480,12 @@ class CaseFiles:
                     projects[project_id_value] = self.store.get_project(project_id_value)
                 except QaError:  # pragma: no cover - project deleted while listing
                     projects[project_id_value] = {}
-        rechecks = {
-            key: self._recheck_map_for(project)
+        traces = {
+            key: self._trace_for(project)
             for key, project in projects.items()
             if project
         }
+        rechecks = {key: self._rechecks_for(library) for key, library in traces.items()}
         items: list[dict[str, Any]] = []
         for row in rows:
             project = projects.get(row["project_id"]) or {}
@@ -439,6 +501,7 @@ class CaseFiles:
                     document=document,
                     needs_recheck=recheck is not None,
                     recheck_reasons=list(recheck.reasons) if recheck is not None else (),
+                    trace=traces.get(row["project_id"]),
                 )
             )
         return {

@@ -563,6 +563,7 @@ _TESTPOINT_KEYS = {
     "owner",
     "tags",
     "note",
+    "group",
 }
 
 
@@ -580,6 +581,7 @@ class TestPoint:
     owner: str | None = None
     tags: tuple[str, ...] = ()
     note: str | None = None
+    group: str | None = None
     schema_version: int = SCHEMA_VERSION
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -609,6 +611,7 @@ class TestPoint:
             owner=reader.optional_str("owner"),
             tags=_read_tags(reader),
             note=reader.optional_str("note"),
+            group=reader.optional_str("group"),
             schema_version=schema_version,
             extra=reader.extra(_TESTPOINT_KEYS),
         )
