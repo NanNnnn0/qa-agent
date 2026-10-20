@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   approveQaTraceReview,
   approveQaTraceReviews,
+  loadQaCase,
   loadQaTraceDrafts,
   loadQaTraceFailure,
   loadQaTraceImpact,
@@ -22,6 +23,7 @@ import {
   type QaMutationTransport,
   type QaTraceCaseNode,
   type QaTraceCoverageBlock,
+  type QaCase,
   type QaTraceDraft,
   type QaTraceFailure,
   type QaTraceImpact,
@@ -121,6 +123,16 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
   const [selectedRun, setSelectedRun] = useState("");
   const [busy, setBusy] = useState("");
   const [draftDetail, setDraftDetail] = useState<QaTraceDraft | null>(null);
+  const [caseDetail, setCaseDetail] = useState<QaCase | null>(null);
+  const openCase = (id: string) => {
+    void (async () => {
+      try {
+        setCaseDetail(await loadQaCase(token, id));
+      } catch (reason) {
+        setActionError(qaErrorMessage(reason));
+      }
+    })();
+  };
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
 
@@ -392,6 +404,7 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
             <div className="flex flex-col gap-4">
               <TraceTreePanel
                 query={treeQuery}
+                onOpenCase={openCase}
                 onPickImpact={(kind, id) => {
                   setImpactKind(kind);
                   setImpactInput(id);
@@ -477,6 +490,52 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
                     )}
                   </QaPre>
                 </QaDetailSection>
+              </QaDetailDrawer>
+              <QaDetailDrawer
+                open={caseDetail !== null}
+                onOpenChange={(open) => {
+                  if (!open) setCaseDetail(null);
+                }}
+                testId="qa-trace-case-drawer"
+                title={caseDetail ? `${caseDetail.code} · ${caseDetail.title}` : ""}
+                description={caseDetail?.code ?? ""}
+                meta={
+                  caseDetail
+                    ? [
+                        { label: tx("qa.cases.kind", "类型"), value: caseDetail.kind },
+                        { label: tx("qa.cases.priority", "优先级"), value: caseDetail.priority },
+                        { label: tx("qa.cases.status", "状态"), value: caseDetail.status },
+                        {
+                          label: tx("qa.testpoints.tags", "标签"),
+                          value: caseDetail.tags.join(", ") || "—",
+                          mono: true,
+                        },
+                      ]
+                    : []
+                }
+              >
+                {caseDetail ? (
+                  <>
+                    <QaDetailSection title={tx("qa.assets.caseRequest", "请求")} hint="JSON">
+                      <QaPre className="max-h-64">
+                        {JSON.stringify(caseDetail.api?.request ?? {}, null, 2)}
+                      </QaPre>
+                    </QaDetailSection>
+                    <QaDetailSection
+                      title={tx("qa.assets.caseAssertions", "断言")}
+                      hint={String(caseDetail.api?.assertions?.length ?? 0)}
+                    >
+                      <QaPre className="max-h-64">
+                        {JSON.stringify(caseDetail.api?.assertions ?? [], null, 2)}
+                      </QaPre>
+                    </QaDetailSection>
+                    <QaDetailSection title={tx("qa.assets.caseExpected", "预期结果")}>
+                      <p className="whitespace-pre-wrap text-[12.5px]">
+                        {caseDetail.expected || "—"}
+                      </p>
+                    </QaDetailSection>
+                  </>
+                ) : null}
               </QaDetailDrawer>
               <TraceFailurePanel
                 runs={runs}
@@ -570,11 +629,14 @@ function TraceMetrics({ summary }: { summary: QaTraceSummary | null }) {
 function TraceTreePanel({
   query,
   onPickImpact,
+  onOpenCase,
 }: {
   query: ReturnType<typeof useQaQuery<QaTraceTree>>;
   onPickImpact: (kind: "source" | "case", id: string) => void;
+  onOpenCase: (id: string) => void;
 }) {
   const tx = useQaCopy();
+  const [open, setOpen] = useState(false);
   const tree = query.data;
   return (
     <QaPanel className="px-4 py-3">
@@ -582,7 +644,7 @@ function TraceTreePanel({
         title={tx("qa.trace.tree.title", "追溯链")}
         count={tree?.counts.cases}
         action={
-          <span className="text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
             {tree
               ? tx("qa.trace.tree.counts", "{{sources}} 来源 · {{testpoints}} 测试点 · {{scripts}} 脚本", {
                   sources: tree.counts.sources,
@@ -590,9 +652,22 @@ function TraceTreePanel({
                   scripts: tree.counts.scripts,
                 })
               : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-6 px-1.5 text-[11px]"
+              onClick={() => setOpen((value) => !value)}
+              data-testid="qa-trace-tree-toggle"
+            >
+              {open
+                ? tx("qa.trace.tree.collapse", "收起")
+                : tx("qa.trace.tree.expand", "展开")}
+            </Button>
           </span>
         }
       />
+      <div className={open ? "flex flex-col gap-2" : "hidden"}>
       {query.error ? (
         <QaErrorBar
           message={`${tx("qa.trace.error.tree", "加载追溯链失败")}: ${query.error}`}
@@ -613,7 +688,12 @@ function TraceTreePanel({
       ) : (
         <ul className="flex flex-col gap-3" data-testid="qa-trace-tree">
           {tree.sources.map((source) => (
-            <SourceRow key={source.id} source={source} onPickImpact={onPickImpact} />
+            <SourceRow
+              key={source.id}
+              source={source}
+              onPickImpact={onPickImpact}
+              onOpenCase={onOpenCase}
+            />
           ))}
           {tree.orphans.length > 0 ? (
             <li
@@ -636,6 +716,7 @@ function TraceTreePanel({
           ) : null}
         </ul>
       )}
+      </div>
     </QaPanel>
   );
 }
@@ -643,9 +724,11 @@ function TraceTreePanel({
 function SourceRow({
   source,
   onPickImpact,
+  onOpenCase,
 }: {
   source: QaTraceSourceNode;
   onPickImpact: (kind: "source" | "case", id: string) => void;
+  onOpenCase: (id: string) => void;
 }) {
   const tx = useQaCopy();
   return (
@@ -708,14 +791,24 @@ function SourceRow({
             ) : (
               <ul className="mt-1 flex flex-col gap-1 pl-5">
                 {testpoint.cases.map((item) => (
-                  <CaseRow key={item.id} item={item} onPickImpact={onPickImpact} />
+                  <CaseRow
+                    key={item.id}
+                    item={item}
+                    onPickImpact={onPickImpact}
+                    onOpenCase={onOpenCase}
+                  />
                 ))}
               </ul>
             )}
           </li>
         ))}
         {source.cases.map((item) => (
-          <CaseRow key={item.id} item={item} onPickImpact={onPickImpact} />
+          <CaseRow
+            key={item.id}
+            item={item}
+            onPickImpact={onPickImpact}
+            onOpenCase={onOpenCase}
+          />
         ))}
       </ul>
     </li>
@@ -725,9 +818,11 @@ function SourceRow({
 function CaseRow({
   item,
   onPickImpact,
+  onOpenCase,
 }: {
   item: QaTraceCaseNode;
   onPickImpact: (kind: "source" | "case", id: string) => void;
+  onOpenCase: (id: string) => void;
 }) {
   const tx = useQaCopy();
   return (
@@ -741,9 +836,15 @@ function CaseRow({
         >
           {item.id}
         </button>
-        <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground" title={item.title}>
+        <button
+          type="button"
+          className="min-w-0 flex-1 truncate text-left text-[12px] text-muted-foreground hover:underline"
+          title={item.title}
+          onClick={() => onOpenCase(item.id)}
+          data-testid={`qa-trace-case-open-${item.id}`}
+        >
           {item.title}
-        </span>
+        </button>
         <QaPriorityBadge priority={item.priority as "P0" | "P1" | "P2" | "P3"} />
         <QaBadge tone={REVIEW_TONE[item.status] ?? "neutral"}>
           {REVIEW_LABEL[item.status] ?? item.status}
