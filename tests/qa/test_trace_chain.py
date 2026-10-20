@@ -15,6 +15,7 @@ from nanobot.qa import shared_store, testpoints
 from nanobot.qa.case_files import CaseFiles
 from nanobot.qa.validation import QaValidationError
 from qa_trace.drafts import approve
+from qa_trace.loader import load_yaml_document
 
 EVIDENCE = [{"type": "openapi", "locator": "#/paths/~1api~1auth~1register/post"}]
 
@@ -81,11 +82,16 @@ def _project_sync() -> str:
     return asyncio.run(_project())
 
 
-def sync_case_create(**fields: Any) -> Any:
-    """Run the case tool synchronously (the tool itself is async)."""
+def asyncio_run(coroutine: Any) -> Any:
+    """Run one tool coroutine from a synchronous test."""
     import asyncio
 
-    return asyncio.run(QaCaseTool().execute("create", **fields))
+    return asyncio.run(coroutine)
+
+
+def sync_case_create(**fields: Any) -> Any:
+    """Run the case tool synchronously (the tool itself is async)."""
+    return asyncio_run(QaCaseTool().execute("create", **fields))
 
 
 async def test_source_draft_is_written_under_the_agent_batch() -> None:
@@ -290,6 +296,35 @@ def test_group_is_normalised_and_listed_with_a_readable_code() -> None:
     assert {item["id"]: item["code"] for item in again["testpoints"]} == {
         item: by_id[item]["code"] for item in by_id
     }
+
+
+def test_the_tool_passes_group_into_the_draft() -> None:
+    project_id = _project_sync()
+    source = testpoints.create_source(
+        shared_store(),
+        project_id,
+        source_type="api",
+        title="register contract",
+        evidence=EVIDENCE,
+        confidence="confirmed",
+    )
+    approve(_directory(project_id), source["id"], reviewer="qa")
+    created = _json(
+        asyncio_run(
+            QaTestpointTool().execute(
+                action="create",
+                entity="testpoint",
+                project_id=project_id,
+                title="username boundary",
+                sources=[source["id"]],
+                group="登录模块/注册界面",
+                note="2 字符和 20 字符都能注册成功",
+            )
+        )
+    )
+    document = load_yaml_document(_directory(project_id) / created["path"])
+    assert document["group"] == "登录模块/注册界面"
+    assert document["note"] == "2 字符和 20 字符都能注册成功"
 
 
 def test_group_rejects_too_many_levels() -> None:
