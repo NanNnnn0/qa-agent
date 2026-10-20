@@ -11,7 +11,7 @@ Cases created through `qa_api_workflow` carry `api_case_metadata.operation_id`. 
 
 ## Decision
 
-1. **Group in the assets tab, not the case library.** An endpoint row gains a case count and an expand control. The expanded panel lists the linked cases (code, title, priority, status), and clicking one opens a case drawer with its request, assertions and expected result.
+1. **Group in the assets tab, not the case library.** An endpoint row gains a case count and an expand control. The expanded panel is a table with the case library's columns minus chain and tags (code, title, kind, priority, status), and clicking a row opens a case drawer with its request, assertions and expected result. The endpoint drawer does not repeat the list - expansion is the only place the cases appear.
 2. **Match by project + method + normalized path.** Path segments that are `{...}`, pure digits or UUIDs collapse to `{}` on both sides, so a case that pins `/api/orders/42` still finds `/api/orders/{}`.
 3. **Read-only and client-side.** The tab loads the project's cases (limit 500) through `GET /api/qa/cases` and groups them in memory. No new route, no new write surface.
 4. **Say what it is.** The empty panel explains that a staged batch is what attaches cases here, and the component comment records that this grouping is temporary.
