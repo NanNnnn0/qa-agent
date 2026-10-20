@@ -2138,7 +2138,7 @@ export function ThreadShell({
         {boundTask && displayMessages.length > 0 ? (
           <div
             className={cn(
-              "pointer-events-none absolute left-3 z-20 w-[17rem] max-w-[calc(100%-1.5rem)]",
+              "pointer-events-none absolute right-3 z-20 w-[17rem] max-w-[calc(100%-1.5rem)]",
               hideHeader ? "top-3" : "top-14",
             )}
           >

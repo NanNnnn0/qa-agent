@@ -56,6 +56,7 @@ import {
   displayTitle,
   groupSessions,
   type ChatProjectDescriptor,
+  type SessionGroup,
   isCollapsedProject,
   isFoldableChatsGroup,
   isFoldedChatsGroup,
@@ -246,6 +247,8 @@ interface ChatListProps {
     qaProjectId?: string,
   ) => void;
   projects?: ChatProjectDescriptor[];
+  onAddProject?: () => void;
+  onRemoveProject?: (group: SessionGroup) => void;
   pinnedKeys?: string[];
   archivedKeys?: string[];
   pinnedPaneKeys?: string[];
@@ -288,6 +291,8 @@ export const ChatList = memo(function ChatList({
   onRequestRenameProject,
   onNewChatInProject,
   projects,
+  onAddProject,
+  onRemoveProject,
   pinnedKeys = [],
   archivedKeys = [],
   pinnedPaneKeys = [],
@@ -743,8 +748,19 @@ export const ChatList = memo(function ChatList({
           return (
             <section key={group.id} aria-label={group.label} className="relative z-[1]">
               {index === firstProjectGroupIndex ? (
-                <div className="px-2 pb-2 pt-2 text-[11px] font-medium leading-4 text-sidebar-muted-foreground">
-                  {labels.projects}
+                <div className="flex items-center justify-between px-2 pb-2 pt-2 text-[11px] font-medium leading-4 text-sidebar-muted-foreground">
+                  <span>{labels.projects}</span>
+                  {onAddProject ? (
+                    <button
+                      type="button"
+                      data-testid="sidebar-project-add"
+                      aria-label={t("chat.projectAdd", { defaultValue: "新增项目" })}
+                      onClick={onAddProject}
+                      className="rounded px-1 text-[13px] leading-4 text-sidebar-muted-foreground media-hover:hover:text-sidebar-foreground"
+                    >
+                      +
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
               <div>
@@ -768,6 +784,11 @@ export const ChatList = memo(function ChatList({
                       onRequestRename={
                         group.projectKey && onRequestRenameProject
                           ? () => onRequestRenameProject(group.projectKey ?? "", group.label)
+                          : undefined
+                      }
+                      onRemove={
+                        group.qaProjectId && onRemoveProject
+                          ? () => onRemoveProject(group)
                           : undefined
                       }
                       onNewChat={
@@ -1713,6 +1734,7 @@ function ProjectGroupHeader({
   onToggle,
   onRequestRename,
   onNewChat,
+  onRemove,
   actionMenuPortalContainer,
 }: {
   active: boolean;
@@ -1724,6 +1746,7 @@ function ProjectGroupHeader({
   onToggle: () => void;
   onRequestRename?: () => void;
   onNewChat?: () => void;
+  onRemove?: () => void;
   actionMenuPortalContainer?: HTMLElement | null;
 }) {
   const { t } = useTranslation();
@@ -1744,7 +1767,7 @@ function ProjectGroupHeader({
 
   return (
       <div
-        onContextMenu={onRequestRename || onNewChat
+        onContextMenu={onRequestRename || onNewChat || onRemove
           ? (event) => actionMenus.openFromContextMenu(event, actionMenuId)
           : undefined}
         className="group flex min-h-8 min-w-0 items-center gap-0.5 rounded-control px-2 text-[13px] leading-5 text-sidebar-content"
@@ -1778,7 +1801,7 @@ function ProjectGroupHeader({
             {projectButton}
           </HoverHint>
         ) : projectButton}
-        {onRequestRename || onNewChat ? (
+        {onRequestRename || onNewChat || onRemove ? (
           <DropdownMenu
             modal={false}
             open={actionMenus.openId === actionMenuId}
@@ -1798,6 +1821,11 @@ function ProjectGroupHeader({
             <SidebarActionMenuContent
               portalContainer={actionMenuPortalContainer}
             >
+              {onRemove ? (
+                <DropdownMenuItem onSelect={onRemove}>
+                  {t("chat.projectRemove", { defaultValue: "删除项目" })}
+                </DropdownMenuItem>
+              ) : null}
               {onNewChat ? (
                 <DropdownMenuItem onSelect={onNewChat}>
                   <Plus className="h-4 w-4 shrink-0" aria-hidden />

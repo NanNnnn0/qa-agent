@@ -1786,6 +1786,29 @@ function Shell({
     void loadQaProjects().catch(() => {});
   }, [getToken, loadQaProjects]);
 
+  const refreshQaProjects = useCallback(async () => {
+    qaProjectsRef.current = null;
+    await loadQaProjects();
+  }, [loadQaProjects]);
+
+  const createQaProjectFromSidebar = useCallback(
+    async (key: string, name: string) => {
+      const { createQaProject } = await import("@/lib/qa-api");
+      await createQaProject(client, { key, name });
+      await refreshQaProjects();
+    },
+    [client, refreshQaProjects],
+  );
+
+  const deleteQaProjectFromSidebar = useCallback(
+    async (projectId: string) => {
+      const { deleteQaProject } = await import("@/lib/qa-api");
+      await deleteQaProject(client, projectId);
+      await refreshQaProjects();
+    },
+    [client, refreshQaProjects],
+  );
+
   const sidebarProjects = useMemo<ChatProjectDescriptor[]>(() => {
     const list: ChatProjectDescriptor[] = [];
     for (const project of qaProjects ?? []) {
@@ -2942,6 +2965,8 @@ function Shell({
     onOpenSkills,
     onOpenQa,
     projects: sidebarProjects,
+    onCreateQaProject: createQaProjectFromSidebar,
+    onDeleteQaProject: deleteQaProjectFromSidebar,
     onSettingsIntent,
     onOpenSearch: onOpenSessionSearch,
     activeUtility: !managingConnections && (view === "apps" || view === "automations" || view === "skills" || view === "channels" || view === "qa") ? view : null,

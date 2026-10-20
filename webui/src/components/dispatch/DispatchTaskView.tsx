@@ -71,7 +71,7 @@ export function DispatchTaskView({
       <div
         data-testid="dispatch-task-view"
         data-variant="sticky"
-        className="pointer-events-auto w-full overflow-hidden rounded-xl border border-amber-300/60 bg-amber-50/95 text-left shadow-md backdrop-blur dark:border-amber-400/25 dark:bg-amber-500/10"
+        className="pointer-events-auto w-full overflow-hidden rounded-xl border border-amber-200/50 bg-amber-50/60 text-left shadow-sm backdrop-blur dark:border-amber-400/15 dark:bg-amber-500/[0.06]"
       >
         <button
           type="button"

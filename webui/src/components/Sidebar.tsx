@@ -32,13 +32,22 @@ import {
   SidebarSelectionHighlight,
 } from "@/components/SidebarSelectionHighlight";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { HoverHint } from "@/components/ui/tooltip";
 import type {
   ChatSummary,
   SidebarViewState,
 } from "@/lib/types";
 import { sessionsWithoutDispatchChildren, type DispatchTask } from "@/lib/dispatch-desk";
-import type { ChatProjectDescriptor } from "@/lib/chat-groups";
+import type { ChatProjectDescriptor, SessionGroup } from "@/lib/chat-groups";
 import { cn } from "@/lib/utils";
 import { sidebarShortcutAria, sidebarShortcutLabel } from "@/lib/sidebar-shortcuts";
 
@@ -78,6 +87,8 @@ interface SidebarProps {
   onOpenSkills: () => void;
   onOpenQa: () => void;
   projects?: ChatProjectDescriptor[];
+  onCreateQaProject?: (key: string, name: string) => Promise<void>;
+  onDeleteQaProject?: (projectId: string) => Promise<void>;
   onOpenAutomations: () => void;
   onOpenChannels: () => void;
   onSettingsIntent?: () => void;
@@ -134,6 +145,46 @@ export function Sidebar(props: SidebarProps) {
   );
   const [menuPortalContainer, setMenuPortalContainer] =
     useState<HTMLElement | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [newKey, setNewKey] = useState("");
+  const [newName, setNewName] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState("");
+  const [removeTarget, setRemoveTarget] = useState<SessionGroup | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  const submitAddProject = async () => {
+    if (addBusy) return;
+    if (!newKey.trim() || !newName.trim()) {
+      setAddError(t("chat.projectKeyNameRequired", { defaultValue: "请填写 KEY 和名称" }));
+      return;
+    }
+    setAddBusy(true);
+    setAddError("");
+    try {
+      await props.onCreateQaProject?.(newKey.trim(), newName.trim());
+      setAddOpen(false);
+      setNewKey("");
+      setNewName("");
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAddBusy(false);
+    }
+  };
+  const submitRemoveProject = async () => {
+    if (!removeTarget?.qaProjectId || removeBusy) return;
+    setRemoveBusy(true);
+    setRemoveError("");
+    try {
+      await props.onDeleteQaProject?.(removeTarget.qaProjectId);
+      setRemoveTarget(null);
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
   const collapsed = Boolean(props.collapsed);
   const toggleLabel = t("thread.header.toggleSidebar");
   const apple = isApplePlatform();
@@ -329,6 +380,11 @@ export function Sidebar(props: SidebarProps) {
             onToggleGroup={props.onToggleGroup}
             onRequestRenameProject={props.onRequestRenameProject}
             onNewChatInProject={props.onNewChatInProject}
+            onAddProject={props.onCreateQaProject ? () => setAddOpen(true) : undefined}
+            onRemoveProject={(group) => {
+              setRemoveError("");
+              setRemoveTarget(group);
+            }}
             projects={props.projects}
             pinnedKeys={props.pinnedKeys}
             archivedKeys={props.archivedKeys}
@@ -370,6 +426,76 @@ export function Sidebar(props: SidebarProps) {
         />
         <HostSwitcher collapsed={collapsed} portalContainer={props.containActionMenus ? menuPortalContainer : undefined} />
       </div>
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="max-w-sm" data-testid="sidebar-project-add-dialog">
+          <DialogHeader>
+            <DialogTitle>{t("chat.projectAdd", { defaultValue: "新增项目" })}</DialogTitle>
+            <DialogDescription>
+              {t("chat.projectAddHint", { defaultValue: "创建一个 QA 项目；创建后会自动分配项目工作区。" })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 text-left">
+            <Input
+              value={newKey}
+              aria-label={t("chat.projectKey", { defaultValue: "KEY" })}
+              placeholder={t("chat.projectKey", { defaultValue: "KEY" })}
+              onChange={(event) => setNewKey(event.target.value)}
+              data-testid="sidebar-project-key"
+            />
+            <Input
+              value={newName}
+              aria-label={t("chat.projectName", { defaultValue: "名称" })}
+              placeholder={t("chat.projectName", { defaultValue: "名称" })}
+              onChange={(event) => setNewName(event.target.value)}
+              data-testid="sidebar-project-name"
+            />
+            {addError ? <p className="text-[12px] text-destructive">{addError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => setAddOpen(false)} disabled={addBusy}>
+              {t("common.cancel", { defaultValue: "取消" })}
+            </Button>
+            <Button
+              type="button"
+              data-testid="sidebar-project-create"
+              disabled={addBusy}
+              onClick={() => void submitAddProject()}
+            >
+              {t("common.save", { defaultValue: "保存" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-sm" data-testid="sidebar-project-remove-dialog">
+          <DialogHeader>
+            <DialogTitle>{t("chat.projectRemove", { defaultValue: "删除项目" })}</DialogTitle>
+            <DialogDescription>
+              {t("chat.projectRemoveHint", { defaultValue: "项目下的用例、脚本、运行记录、任务和定时任务会一并删除，且不可撤销。" })}
+            </DialogDescription>
+          </DialogHeader>
+          {removeError ? <p className="text-[12px] text-destructive">{removeError}</p> : null}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => setRemoveTarget(null)} disabled={removeBusy}>
+              {t("common.cancel", { defaultValue: "取消" })}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              data-testid="sidebar-project-remove-confirm"
+              disabled={removeBusy}
+              onClick={() => void submitRemoveProject()}
+            >
+              {t("chat.projectRemove", { defaultValue: "删除项目" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </nav>
   );
 }
