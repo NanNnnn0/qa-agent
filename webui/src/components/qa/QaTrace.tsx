@@ -637,10 +637,13 @@ function TraceGapsPanel({
     const sources: { id: string; title: string; hint: string }[] = [];
     const testpoints: { id: string; title: string; hint: string }[] = [];
     for (const source of tree?.sources ?? []) {
+      // A retired source is closed on purpose, not a coverage gap.
+      if (source.status !== "active") continue;
       if (source.testpoints.length === 0) {
         sources.push({ id: source.id, title: source.title, hint: source.id });
       }
       for (const testpoint of source.testpoints) {
+        if (testpoint.status === "deprecated") continue;
         if (testpoint.cases.length > 0) continue;
         if (testpoints.some((item) => item.id === testpoint.id)) continue;
         testpoints.push({

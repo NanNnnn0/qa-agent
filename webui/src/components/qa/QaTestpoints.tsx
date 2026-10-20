@@ -321,7 +321,16 @@ export function QaTestpoints({
                         {source.id}
                       </td>
                       <td className={QA_TD_CLASS}>
-                        <QaBadge tone={SOURCE_TONE[source.type] ?? "neutral"}>{source.type}</QaBadge>
+                        <span className="inline-flex items-center gap-1">
+                          <QaBadge tone={SOURCE_TONE[source.type] ?? "neutral"}>
+                            {source.type}
+                          </QaBadge>
+                          {source.status === "deprecated" ? (
+                            <QaBadge tone="neutral">
+                              {tx("qa.testpoints.deprecated", "已弃用")}
+                            </QaBadge>
+                          ) : null}
+                        </span>
                       </td>
                       <td className={cn(QA_TD_CLASS, "max-w-[24rem] truncate")}>{source.title}</td>
                       <td className={cn(QA_TD_CLASS, "text-[12px] text-muted-foreground")}>
