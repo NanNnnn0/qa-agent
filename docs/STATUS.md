@@ -21,10 +21,10 @@ The QA test row and the API asset layer were re-verified on 2026-10-19 in worktr
 
 | Check | Command | Result |
 |---|---|---|
-| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 248 passed in 50.90s (2026-10-19, `feat/qa-api-gateway-tools`) |
+| QA tests | `.venv/bin/python -m pytest tests/qa -q` | 255 passed in 52.54s (2026-10-20, `feat/qa-trace-chain`) |
 | Adjacent suites | `.venv/bin/python -m pytest tests/agent tests/tools tests/gateway -q` | 3197 passed, 1 failed (`test_grep_searches_pdf_with_page_locator`: the `fitz` package is not installed) |
 | Lint | `.venv/bin/python -m ruff check nanobot/qa` | All checks passed |
-| QA workbench tests | `cd webui && npx vitest run qa-` | 39 passed in 8.51s (2026-10-20, `feat/qa-case-nesting`) |
+| QA workbench tests | `cd webui && npx vitest run qa-` | 44 passed in 8.56s (2026-10-20, `feat/qa-trace-chain`) |
 | Full WebUI suite | `cd webui && npm test` | 2797 passed in 170s, twice in a row (2026-10-18) |
 
 CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 7m57s. The same WebUI suite takes 170s on this 6-vCPU host, so budget roughly three times the local run for CI; the webui job is capped at 15 minutes.
@@ -43,6 +43,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 - Pinned API runs: `nanobot/qa/execution.py` gates a run with preflight, executes ready cases through the fixed `nanobot/qa/templates/case_template.py` in a subprocess, pins each case revision in the run report, batches above 200 cases, masks credentials (bearer or JSON login, `env:NAME` references) and classifies every failure. `api.extract` plus `{{run.<name>}}` chains values between cases; a failed login persists a run with `classification: auth_failed`.
 - One run pipeline: `service.execute_cases` (the WebUI route, the `qa_run` tool, the CLI and scheduled runs) is an adapter over the same pinned pipeline, so every entry point refuses unready cases, pins revisions, batches and masks. Only `ready` cases execute; the old in-process loop and its 200-case cap are gone (ADR 0008).
 - Workbench surface (ADR 0009): a new API assets tab lists the catalog with evidence and the normalized spec, the run drawer renders the structured summary, per-phase counts, pinned case revisions and failure classifications, and the case drawer lists revision history. The read routes are `GET /api/qa/api-operations`, `GET /api/qa/api-operations/{id}` and `GET /api/qa/cases/{id}/revisions`; writes stay on the `qa.*` channel.
+- Trace chain writes (ADR 0012): `qa_testpoint` writes source and test point **drafts** (`draft/agent/...`) and `action=attach` links cases to a formal test point; `qa_case` gained `testpoints`/`sources`/`direct_reason`/`risk`; a `ready` case without a test point is refused by the tool and the HTTP route (`draft` may stay unlinked). The workbench has a read-only test points tab with sources, coverage counts, pending drafts and the cases that still have no chain. `GET /api/qa/testpoints?project_id=` serves it.
 - Endpoint case nesting (ADR 0011, temporary): each assets row shows how many API cases hang off that endpoint and expands into a table with the case library's columns minus chain and tags (code, title, kind, priority, status); a nested case opens its request, assertions and expected result. The endpoint drawer does not repeat the list. Matching is client-side by project + method + normalized path (`/api/orders/42` finds `/api/orders/{}`), because cases created through `qa_case` carry no catalog link.
 - Ordered run plans: `plan={version, setup, cases, cleanup}` with `{case_id, revision?}` steps. Setup runs first, a failed setup step marks the cases phase `dependency_blocked`, cleanup always runs, and a cleanup failure is classified `cleanup_failed`. A pinned revision must match the case's current revision, and the run report records the plan with resolved revisions.
 - Background runs: `qa_api_run start` returns a `running` row and executes on `nanobot/qa/scheduler.py`, which serializes runs per project and lets different projects proceed in parallel. `get` polls; `wait=true` blocks. A gateway restart leaves a `running` row as evidence instead of rewriting it.
@@ -53,6 +54,7 @@ CI wall clock on 2026-10-18 with both jobs running: Python gate 46s, WebUI gate 
 ## Known gaps
 
 - The workbench run button now refuses draft cases with the case codes; the release note for that behavior change is still owed to operators.
+- The trace chain only covers YAML-backed cases: the legacy SQLite rows (the twenty CHEYICHA-API cases) need `python -m qa_trace trace migrate-sqlite --project CHEYICHA-API` before they can be linked, and the case library still shows a case's direct `sources` only, so a case linked through a test point shows no source until the badge computes it transitively.
 - The assets tab nests cases by normalized path, not by a stored catalog link: cases whose request path differs from the endpoint (another host prefix, a query-only variant) stay in the flat case library. Writing `operation_id` on every API case is the durable fix (ADR 0011).
 - A dispatched `api` specialist does not have `qa_api_*` (main-agent scope only), yet `nanobot/qa/roles.py` names them in the role guide and the shared tool contract. Closing it needs a compact subagent facade or a decision to raise the subagent prompt budget.
 - A parallel session owns `feat/qa-workbench-polish` with its own schema v3 content (a `schedules` table and YAML case-index columns) and `nanobot/qa/scheduler.py`; this branch renamed its run queue to `nanobot/qa/run_queue.py`. Merging both needs a full gate run on the merged tree, not a version bump (ADR 0007).

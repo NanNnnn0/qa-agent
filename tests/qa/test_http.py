@@ -50,7 +50,9 @@ async def test_write_routes_require_websocket(store: QaStore) -> None:
     assert response.status_code == 405
 
 
-async def test_create_project_and_case_through_mutations(store: QaStore) -> None:
+async def test_create_project_and_case_through_mutations(
+    store: QaStore, qa_chain
+) -> None:
     api = QaApi(store)
     request = make_request(
         "/api/qa/projects/create",
@@ -60,6 +62,7 @@ async def test_create_project_and_case_through_mutations(store: QaStore) -> None
     payload = _body(response)
     assert payload["ok"] is True
     project_id = payload["project"]["id"]
+    _, testpoint_id = qa_chain(store, project_id)
 
     request = make_request(
         "/api/qa/cases/create",
@@ -84,7 +87,15 @@ async def test_create_project_and_case_through_mutations(store: QaStore) -> None
     assert listing["total"] == 1
     case_id = listing["items"][0]["id"]
 
-    request = make_request("/api/qa/cases/update", {"id": case_id, "status": "ready"})
+    request = make_request(
+        "/api/qa/cases/update",
+        {
+            "id": case_id,
+            "status": "ready",
+            "testpoints": [testpoint_id],
+            "risk": "low",
+        },
+    )
     response = await _dispatch(api, request, "/api/qa/cases/update")
     assert _body(response)["case"]["status"] == "ready"
 

@@ -26,8 +26,10 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from nanobot.qa import service
+from nanobot.qa import testpoints as qa_testpoints
 from nanobot.qa.case_files import CaseFiles
 from nanobot.qa.store import QaStore
+from nanobot.qa.testpoints import require_links_for_ready
 from nanobot.qa.validation import (
     QaConflictError,
     QaError,
@@ -236,6 +238,11 @@ class QaApi:
                 limit=_int_query(query, "limit", 50),
                 offset=_int_query(query, "offset", 0),
             ))
+        if path == f"{QA_PREFIX}/testpoints":
+            project_id = _query_first(query, "project_id")
+            if not project_id:
+                raise QaValidationError("project_id is required")
+            return _ok(qa_testpoints.list_assets(store, project_id))
         if path == f"{QA_PREFIX}/api-operations":
             return _ok(store.list_api_operations(
                 _query_first(query, "project_id") or None,
@@ -359,6 +366,12 @@ class QaApi:
             store.delete_project(_require_id(payload))
             return _ok({"deleted": True})
         if path == "/api/qa/cases/create":
+            require_links_for_ready(
+                payload.get("status") or "draft",
+                payload.get("testpoints"),
+                payload.get("sources"),
+                payload.get("direct_reason"),
+            )
             case = self._cases().create_case(
                 (_require_field(payload, "project_id")),
                 **_fields(payload, _CASE_WRITE_FIELDS),
@@ -386,6 +399,14 @@ class QaApi:
                     errors.append({"index": index, "error": str(exc)})
             return _ok({"cases": created, "errors": errors, "created": len(created)})
         if path == "/api/qa/cases/update":
+            if payload.get("status") == "ready":
+                current = self._cases().get_case(_require_id(payload))
+                require_links_for_ready(
+                    "ready",
+                    payload.get("testpoints", current.get("testpoints")),
+                    payload.get("sources", current.get("sources")),
+                    payload.get("direct_reason", current.get("direct_reason")),
+                )
             case = self._cases().update_case(
                 _require_id(payload), **_fields(payload, _CASE_WRITE_FIELDS)
             )

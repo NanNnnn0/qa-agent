@@ -30,6 +30,7 @@ from nanobot.qa.case_files import CaseFiles
 from nanobot.qa.chat_context import bound_project_id
 from nanobot.qa.roles import ROLE_LABELS, compose_prompt
 from nanobot.qa.store import QaStore
+from nanobot.qa.testpoints import require_links_for_ready
 from nanobot.qa.validation import (
     CASE_KINDS,
     CASE_PRIORITIES,
@@ -232,6 +233,27 @@ class QaProjectTool(_QaTool):
     ),
     expected=StringSchema("Expected overall result."),
     tags=ArraySchema(StringSchema(""), description="Free-form labels."),
+    testpoints=ArraySchema(
+        StringSchema(""),
+        description=(
+            "Test point ids this case verifies (the preferred link). List them with "
+            "qa_testpoint action=list entity=testpoint."
+        ),
+    ),
+    sources=ArraySchema(
+        StringSchema(""),
+        description=(
+            "Source ids, only when no test point fits; then direct_reason is required."
+        ),
+    ),
+    direct_reason=StringSchema(
+        "Why this case hangs off a source instead of a test point."
+    ),
+    risk=StringSchema(
+        "Trace risk (low|medium|high). The trace model requires it to promote a case "
+        "that has no test point.",
+        enum=("low", "medium", "high"),
+    ),
     query=StringSchema("list: substring match on title/code/tags/expected."),
     limit=IntegerSchema(description="list: page size.", minimum=1, maximum=500),
     cases=ArraySchema({"type": "object"}, description="bulk_create: case objects."),
@@ -268,6 +290,10 @@ class QaCaseTool(_QaTool):
         api: dict[str, Any] | None = None,
         expected: str | None = None,
         tags: list[str] | None = None,
+        testpoints: list[str] | None = None,
+        sources: list[str] | None = None,
+        direct_reason: str | None = None,
+        risk: str | None = None,
         query: str | None = None,
         limit: int | None = None,
         cases: list[dict[str, Any]] | None = None,
@@ -295,6 +321,9 @@ class QaCaseTool(_QaTool):
             if action == "create":
                 if not project_id:
                     return ToolResult.error("Error: create requires project_id")
+                require_links_for_ready(
+                    status or "draft", testpoints, sources, direct_reason
+                )
                 case = library.create_case(
                     project_id,
                     title=title or "",
@@ -307,6 +336,10 @@ class QaCaseTool(_QaTool):
                     api=api,
                     expected=expected or "",
                     tags=tags,
+                    testpoints=testpoints,
+                    sources=sources,
+                    direct_reason=direct_reason,
+                    risk=risk,
                     source="ai",
                 )
                 return _dumps({"case": case})
@@ -326,6 +359,12 @@ class QaCaseTool(_QaTool):
                         errors.append({"index": index, "error": "project_id is required"})
                         continue
                     try:
+                        require_links_for_ready(
+                            item.get("status", "draft"),
+                            item.get("testpoints"),
+                            item.get("sources"),
+                            item.get("direct_reason"),
+                        )
                         created.append(library.create_case(
                             target_project,
                             title=item.get("title", ""),
@@ -338,6 +377,10 @@ class QaCaseTool(_QaTool):
                             api=item.get("api"),
                             expected=item.get("expected", ""),
                             tags=item.get("tags"),
+                            testpoints=item.get("testpoints"),
+                            sources=item.get("sources"),
+                            direct_reason=item.get("direct_reason"),
+                            risk=item.get("risk"),
                             source="ai",
                         ))
                     except QaError as exc:
@@ -350,6 +393,16 @@ class QaCaseTool(_QaTool):
             if action == "update":
                 if not case_id:
                     return ToolResult.error("Error: update requires case_id")
+                if status == "ready":
+                    current = library.get_case(case_id)
+                    require_links_for_ready(
+                        "ready",
+                        testpoints if testpoints is not None else current.get("testpoints"),
+                        sources if sources is not None else current.get("sources"),
+                        direct_reason
+                        if direct_reason is not None
+                        else current.get("direct_reason"),
+                    )
                 case = library.update_case(
                     case_id,
                     title=title,
@@ -362,6 +415,10 @@ class QaCaseTool(_QaTool):
                     api=api,
                     expected=expected,
                     tags=tags,
+                    testpoints=testpoints,
+                    sources=sources,
+                    direct_reason=direct_reason,
+                    risk=risk,
                 )
                 return _dumps({"case": case})
             if action == "delete":

@@ -81,6 +81,23 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 用 `qa_task action=update` 落结论，并 `qa_task action=artifact` 挂上 run。
 缺陷摘要格式：`接口 + 场景 + 期望 vs 实际 + 复现请求(curl) + 初步判断`。
 
+## 链路：用例挂测试点，测试点挂来源
+
+用例进正式库的前提是"有链路"：`testpoints` 或（少数情况）`sources` 至少一个。
+
+1. 先查已有的：`qa_testpoint action=list entity=testpoint`；没有合适的再 `action=list entity=source`。
+2. 没有来源就先建：`qa_testpoint action=create entity=source source_type=api|req|ui|bug|std|ex title=... evidence=[{"type":"openapi","locator":"#/paths/~1api~1x/post"}]`。来源必须带证据；`confidence=confirmed` 只用于用户提供的权威文档（评审会拒绝 observed 来源下的测试点）。
+3. 建测试点：`qa_testpoint action=create entity=testpoint title=... sources=["API-..."] method=boundary risk=low`。
+4. 写用例时挂上：`qa_case action=create ... testpoints=["TP-..."]`。`status=ready` 必须挂测试点，否则工具直接报错；`draft` 允许先不挂、后补。
+5. 草稿要在「测试点」页签（或 `qa trace review approve`）通过评审，用例才进正式库、覆盖率才算数。
+
+硬性规则：
+- 一条用例挂 1 个测试点（最多 3 个）；一个测试点可以被多条用例覆盖。
+- 直接挂来源（`sources`）是例外：确实没有合适测试点时才用，并且必须写 `direct_reason`。
+- 不要编造 id：`sources`/`testpoints` 只能填工具列出来的、已存在的 id。
+- 存量用例没挂链路：`qa_testpoint action=attach testpoint_id=... case_ids=[...]` 批量补。
+
+
 ## 边界
 
 - 只写结构化产物到 qa_* 工具，不要在对话里贴一堆 JSON 当交付。

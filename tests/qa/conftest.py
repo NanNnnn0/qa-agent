@@ -34,6 +34,37 @@ def qa_case_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def qa_chain():
+    """Create and approve one source and one test point, then return both ids.
+
+    A ready case must link a test point (ADR 0012), so a test that needs an
+    executable case builds the chain first instead of writing an unlinked one.
+    """
+    from nanobot.qa import testpoints
+    from nanobot.qa.case_files import CaseFiles
+    from qa_trace.drafts import approve
+
+    def _build(store, project_id: str):
+        directory = CaseFiles(store).project_dir(store.get_project(project_id))
+        source = testpoints.create_source(
+            store,
+            project_id,
+            source_type="req",
+            title="requirement",
+            evidence=[{"type": "document", "locator": "docs/requirement.md"}],
+            confidence="confirmed",
+        )
+        approve(directory, source["id"], reviewer="qa")
+        testpoint = testpoints.create_testpoint(
+            store, project_id, title="behaviour", sources=[source["id"]]
+        )
+        approve(directory, testpoint["id"], reviewer="qa")
+        return source["id"], testpoint["id"]
+
+    return _build
+
+
+@pytest.fixture
 def store(tmp_path: Path) -> Iterator[QaStore]:
     instance = QaStore(tmp_path / "qa.sqlite3")
     try:
