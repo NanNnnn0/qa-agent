@@ -615,17 +615,42 @@ class TraceApi:
 
     @_api_errors
     def review_approve(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Promote one draft, or re-review one formal test point/case."""
-        entity_id = _require_id(payload)
+        """Promote one draft, or re-review one formal test point/case.
+
+        ``ids`` promotes a whole batch in one call: every failure is reported per
+        entity so one blocked draft (for example a test point whose source is
+        still a draft) does not hide the ones that went through.
+        """
+        reviewer = _optional_str(payload, "reviewer")
+        note = _optional_str(payload, "note")
+        raw_ids = payload.get("ids")
+        if raw_ids is None:
+            entity_id = _require_id(payload)
+            root = self.resolve_project(_optional_str(payload, "project"))
+            outcome = approve(
+                root,
+                entity_id,
+                batch=_optional_str(payload, "batch"),
+                reviewer=reviewer,
+                note=note,
+            )
+            return {"review": outcome.to_dict()}
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise QaValidationError("ids must be a non-empty array")
         root = self.resolve_project(_optional_str(payload, "project"))
-        outcome = approve(
-            root,
-            entity_id,
-            batch=_optional_str(payload, "batch"),
-            reviewer=_optional_str(payload, "reviewer"),
-            note=_optional_str(payload, "note"),
-        )
-        return {"review": outcome.to_dict()}
+        reviews: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
+        for item in raw_ids:
+            entity_id = str(item).strip()
+            if not entity_id:
+                continue
+            try:
+                outcome = approve(root, entity_id, reviewer=reviewer, note=note)
+            except QaTraceError as exc:
+                failed.append({"id": entity_id, "error": exc.format()})
+                continue
+            reviews.append(outcome.to_dict())
+        return {"reviews": reviews, "approved": len(reviews), "failed": failed}
 
     @_api_errors
     def review_reject(self, payload: Mapping[str, Any]) -> dict[str, Any]:

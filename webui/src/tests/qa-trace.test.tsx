@@ -542,6 +542,24 @@ describe("QA trace tab", () => {
     expect(impactUrl).toContain("project=login-lock");
   });
 
+  it("approves the whole batch through one mutation", async () => {
+    const user = userEvent.setup();
+    const { requestMutation } = renderTrace();
+
+    await user.click(await screen.findByTestId("qa-trace-approve-all"));
+
+    await waitFor(() => {
+      expect(requestMutation).toHaveBeenCalledWith(
+        "qa.trace.review_approve",
+        {
+          project: "login-lock",
+          ids: expect.arrayContaining(["TC-LOGIN-004"]),
+        },
+        expect.any(Number),
+      );
+    });
+  });
+
   it("approves a draft through qa.trace.review_approve", async () => {
     const user = userEvent.setup();
     const { requestMutation } = renderTrace();
