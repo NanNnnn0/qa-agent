@@ -70,6 +70,9 @@ export function QaTestpoints({
 
   const data = query.data;
   const counts = data?.counts;
+  const sourceTitles = new Map(
+    (data?.sources ?? []).map((source) => [source.id, source.title || source.id]),
+  );
 
   return (
     <div className="flex flex-col gap-3" data-testid="qa-testpoints">
@@ -219,7 +222,9 @@ export function QaTestpoints({
                         {testpoint.title}
                       </td>
                       <td className={cn(QA_TD_CLASS, "font-mono text-[11.5px] text-muted-foreground")}>
-                        {testpoint.sources.join(", ")}
+                        {testpoint.sources
+                          .map((id) => sourceTitles.get(id) ?? id)
+                          .join(", ")}
                       </td>
                       <td className={cn(QA_TD_CLASS, "text-[12px]")}>{testpoint.method}</td>
                       <td className={QA_TD_CLASS}>

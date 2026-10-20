@@ -79,7 +79,7 @@ describe("test points tab", () => {
     expect(await screen.findByTestId("qa-source-API-SHOP-01")).toBeInTheDocument();
     const testpoint = screen.getByTestId("qa-testpoint-TP-SHOP-001");
     expect(testpoint).toHaveTextContent("username boundary");
-    expect(testpoint).toHaveTextContent("API-SHOP-01");
+    expect(testpoint).toHaveTextContent("register contract");
     expect(testpoint).toHaveTextContent("2");
   });
 
