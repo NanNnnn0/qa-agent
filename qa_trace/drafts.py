@@ -197,6 +197,7 @@ class DraftEntity:
             "rejected_by": self.rejected_by,
             "rejected_at": self.rejected_at,
             "note": self.note,
+            "entity": dict(self.raw) if self.raw else {},
         }
 
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, GitBranch, RefreshCw, Search, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { QaDetailDrawer, QaDetailSection } from "./QaDetailDrawer";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -119,6 +120,7 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
   const [reviewer, setReviewer] = useState("");
   const [selectedRun, setSelectedRun] = useState("");
   const [busy, setBusy] = useState("");
+  const [draftDetail, setDraftDetail] = useState<QaTraceDraft | null>(null);
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
 
@@ -427,8 +429,55 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
                 onReviewerChange={setReviewer}
                 onDecide={decideDraft}
                 onApproveAll={approveAllDrafts}
+                onInspect={setDraftDetail}
                 onRetry={draftsQuery.reload}
               />
+              <QaDetailDrawer
+                open={draftDetail !== null}
+                onOpenChange={(open) => {
+                  if (!open) setDraftDetail(null);
+                }}
+                testId="qa-trace-draft-drawer"
+                title={draftDetail ? `${draftDetail.kind} ${draftDetail.id}` : ""}
+                description={draftDetail?.path ?? ""}
+                badge={
+                  draftDetail ? (
+                    <QaBadge tone={draftDetail.valid ? "amber" : "red"}>
+                      {draftDetail.valid
+                        ? tx("qa.trace.drafts.pending", "待审核")
+                        : tx("qa.trace.drafts.invalid", "草稿无效")}
+                    </QaBadge>
+                  ) : null
+                }
+                meta={
+                  draftDetail
+                    ? [
+                        { label: tx("qa.trace.drafts.batch", "批次"), value: draftDetail.batch, mono: true },
+                        { label: tx("qa.trace.drafts.status", "状态"), value: draftDetail.status },
+                      ]
+                    : []
+                }
+              >
+                {draftDetail && draftDetail.problems.length > 0 ? (
+                  <QaDetailSection title={tx("qa.trace.drafts.problems", "问题")}>
+                    <ul className="flex flex-col gap-1 text-[11.5px] text-destructive">
+                      {draftDetail.problems.map((problem) => (
+                        <li key={problem}>{problem}</li>
+                      ))}
+                    </ul>
+                  </QaDetailSection>
+                ) : null}
+                <QaDetailSection title={tx("qa.trace.drafts.content", "内容")} hint="YAML">
+                  <QaPre className="max-h-[26rem]">
+                    {JSON.stringify(
+                      (draftDetail as (QaTraceDraft & { entity?: Record<string, unknown> }) | null)
+                        ?.entity ?? {},
+                      null,
+                      2,
+                    )}
+                  </QaPre>
+                </QaDetailSection>
+              </QaDetailDrawer>
               <TraceFailurePanel
                 runs={runs}
                 runsLoading={runsQuery.loading && runs.length === 0}
@@ -987,6 +1036,7 @@ function TraceDraftsPanel({
   onReviewerChange,
   onDecide,
   onApproveAll,
+  onInspect,
   onRetry,
 }: {
   drafts: QaTraceDraft[];
@@ -997,6 +1047,7 @@ function TraceDraftsPanel({
   onReviewerChange: (value: string) => void;
   onDecide: (draft: QaTraceDraft, approved: boolean) => void;
   onApproveAll: () => void;
+  onInspect: (draft: QaTraceDraft) => void;
   onRetry: () => void;
 }) {
   const tx = useQaCopy();
@@ -1081,6 +1132,16 @@ function TraceDraftsPanel({
                           : tx("qa.trace.drafts.invalid", "草稿无效")}
                     </QaBadge>
                     <span className="min-w-0 flex-1" />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 gap-1 px-2 text-[12px]"
+                      onClick={() => onInspect(draft)}
+                      data-testid={`qa-trace-inspect-${draft.id}`}
+                    >
+                      {tx("qa.trace.drafts.inspect", "详情")}
+                    </Button>
                     <Button
                       type="button"
                       size="sm"
