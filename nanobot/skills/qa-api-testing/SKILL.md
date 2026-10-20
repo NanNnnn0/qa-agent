@@ -87,7 +87,7 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 
 1. 先查已有的：`qa_testpoint action=list entity=testpoint`；没有合适的再 `action=list entity=source`。
 2. 没有来源就先建：`qa_testpoint action=create entity=source source_type=api|req|ui|bug|std|ex title=... evidence=[{"type":"openapi","locator":"#/paths/~1api~1x/post"}]`。来源必须带证据；`confidence=confirmed` 只用于用户提供的权威文档（评审会拒绝 observed 来源下的测试点）。
-3. 建测试点：`qa_testpoint action=create entity=testpoint title=... sources=["API-..."] method=boundary risk=low`。
+3. 建测试点：`qa_testpoint action=create entity=testpoint title=... sources=["API-..."] method=boundary risk=low group="登录模块/注册界面" note="测什么、怎么判定"`。
 4. 写用例时挂上：`qa_case action=create ... testpoints=["TP-..."]`。`status=ready` 必须挂测试点，否则工具直接报错；`draft` 允许先不挂、后补。
 5. 草稿要在「测试点」页签（或 `qa trace review approve`）通过评审，用例才进正式库、覆盖率才算数。
 
@@ -95,6 +95,9 @@ metadata: {"nanobot":{"emoji":"🔌"}}
 - 一条用例挂 1 个测试点（最多 3 个）；一个测试点可以被多条用例覆盖。
 - 直接挂来源（`sources`）是例外：确实没有合适测试点时才用，并且必须写 `direct_reason`。
 - 不要编造 id：`sources`/`testpoints` 只能填工具列出来的、已存在的 id。
+- 建测试点必须写 `group`：`模块/页面` 两三级（如 `登录模块/注册界面`）。工作台的「测试点」和「用例库」都按它分层，不写就落到「未分组」，用例多了会乱。
+- 建测试点必须写 `note`：一句话说明「测什么、怎么判定」，测试点详情抽屉直接展示它；`note` 属于评审指纹，改了会让挂在上面的用例进「需复核」。
+- 列表里的 `TP-01` 是显示用短号（按 id 排序算出来的），真正传参的还是完整 id：用 `action=list` 拿到的 `id`，不要拿短号去 `testpoints=[...]`。
 - 存量用例没挂链路：`qa_testpoint action=attach testpoint_id=... case_ids=[...]` 批量补。
 
 

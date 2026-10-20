@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, BadgeCheck, Download, Plus, Upload } from "lucide-react";
+import { Archive, BadgeCheck, ChevronDown, ChevronRight, Download, Plus, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +54,7 @@ import {
   qaKindLabel,
   useQaCopy,
 } from "./qa-ui";
+import { buildGroupTree, flattenGroups, groupLabel, toggleCollapsed } from "./qa-groups";
 import { useQaDebouncedValue, useQaQuery } from "./useQaQuery";
 
 const CASE_KINDS: QaCaseKind[] = ["api", "ui", "manual"];
@@ -80,35 +81,102 @@ function splitIds(value: string): string[] {
     .filter(Boolean);
 }
 
+/** One chain badge; a button when there is somewhere to go (the drawer). */
+function QaChainBadge({
+  tone,
+  label,
+  title,
+  onOpen,
+  testId,
+}: {
+  tone: "blue" | "violet" | "neutral" | "green" | "amber" | "red";
+  label: string;
+  title: string;
+  onOpen?: () => void;
+  testId?: string;
+}) {
+  const badge = (
+    <QaBadge tone={tone} title={title}>
+      {label}
+    </QaBadge>
+  );
+  if (!onOpen) return badge;
+  return (
+    <button
+      type="button"
+      title={title}
+      data-testid={testId}
+      className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen();
+      }}
+    >
+      {badge}
+    </button>
+  );
+}
+
 /**
  * Chain badges of one case: 来源 / 测试点 / 脚本 / 需复核.
  *
- * Read-only display: editing the links happens in the drawer, but the table has
- * to show at a glance whether a case is traceable at all (a migrated SQLite case
- * starts with no source and no test point, so it cannot be reviewed).
+ * The badges read the *resolved* chain: a case that hangs off a test point
+ * inherits that test point's sources, so a properly linked case never reads
+ * "缺少来源".  Titles spell the chain out, and clicking a badge opens the drawer
+ * where the chain is listed by title instead of id.
  */
-function QaCaseChain({ item }: { item: QaCase }) {
+function QaCaseChain({ item, onOpen }: { item: QaCase; onOpen?: () => void }) {
   const tx = useQaCopy();
-  const sources = item.sources ?? [];
-  const testpoints = item.testpoints ?? [];
+  const sources = item.trace_sources ?? (item.sources ?? []).map((id) => ({
+    id,
+    title: "",
+    type: "",
+    direct: true,
+  }));
+  const testpoints = item.trace_testpoints ?? (item.testpoints ?? []).map((id) => ({
+    id,
+    code: "",
+    title: "",
+    group: null,
+    risk: "",
+  }));
+  const inherited = sources.length > 0 && (item.sources ?? []).length === 0;
+  const sourceNames = sources.map((source) => source.title || source.id);
+  const testpointNames = testpoints.map((testpoint) =>
+    [testpoint.code, testpoint.title || testpoint.id].filter(Boolean).join(" "),
+  );
   return (
     <div className="flex flex-wrap items-center gap-1" data-testid="qa-case-chain">
-      <QaBadge
+      <QaChainBadge
         tone={sources.length ? "blue" : "neutral"}
-        title={sources.join(", ") || tx("qa.cases.chainNoSource", "缺少来源")}
-      >
-        {sources.length
-          ? `${tx("qa.cases.chainSource", "来源")} ${sources.length}`
-          : tx("qa.cases.chainNoSource", "缺少来源")}
-      </QaBadge>
-      <QaBadge
+        testId="qa-case-chain-source"
+        onOpen={onOpen}
+        label={
+          sources.length
+            ? `${tx("qa.cases.chainSource", "来源")} ${sources.length}`
+            : tx("qa.cases.chainNoSource", "缺少来源")
+        }
+        title={
+          sources.length
+            ? `${inherited ? tx("qa.cases.chainInheritedPrefix", "经由测试点：") : ""}${sourceNames.join("、")}`
+            : tx("qa.cases.chainNoSource", "缺少来源")
+        }
+      />
+      <QaChainBadge
         tone={testpoints.length ? "violet" : "neutral"}
-        title={testpoints.join(", ") || tx("qa.cases.chainNoTestpoint", "缺少测试点")}
-      >
-        {testpoints.length
-          ? `${tx("qa.cases.chainTestpoint", "测试点")} ${testpoints.length}`
-          : tx("qa.cases.chainNoTestpoint", "缺少测试点")}
-      </QaBadge>
+        testId="qa-case-chain-testpoint"
+        onOpen={onOpen}
+        label={
+          testpoints.length
+            ? `${tx("qa.cases.chainTestpoint", "测试点")} ${testpoints.length}`
+            : tx("qa.cases.chainNoTestpoint", "缺少测试点")
+        }
+        title={
+          testpoints.length
+            ? testpointNames.join("、")
+            : tx("qa.cases.chainNoTestpoint", "缺少测试点")
+        }
+      />
       {item.script ? (
         <QaBadge tone="green" title={item.script.binding}>
           {tx("qa.cases.chainScript", "脚本")}
@@ -125,6 +193,87 @@ function QaCaseChain({ item }: { item: QaCase }) {
         </QaBadge>
       ) : null}
     </div>
+  );
+}
+
+/** Read-only, resolved chain shown in the drawer: titles, groups, provenance. */
+function QaCaseChainDetail({ item }: { item: QaCase }) {
+  const tx = useQaCopy();
+  const testpoints = item.trace_testpoints ?? [];
+  const sources = item.trace_sources ?? [];
+  if (testpoints.length === 0 && sources.length === 0) return null;
+  return (
+    <div
+      className="rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-[12px]"
+      data-testid="qa-case-chain-detail"
+    >
+      <p className="text-[11px] text-muted-foreground">
+        {tx("qa.cases.chainResolved", "已解析链路（来源可经由测试点继承）")}
+      </p>
+      <ul className="mt-1 flex flex-col gap-1">
+        {testpoints.map((testpoint) => (
+          <li key={testpoint.id} className="flex items-center gap-1.5">
+            <QaBadge tone="violet">{testpoint.code || "TP"}</QaBadge>
+            <span className="min-w-0 flex-1 truncate" title={testpoint.title}>
+              {testpoint.title || testpoint.id}
+            </span>
+            {testpoint.group ? (
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                {groupLabel(testpoint.group)}
+              </span>
+            ) : null}
+          </li>
+        ))}
+        {sources.map((source) => (
+          <li key={source.id} className="flex items-center gap-1.5">
+            <QaBadge tone="blue">{source.type || "src"}</QaBadge>
+            <span className="min-w-0 flex-1 truncate" title={source.title || source.id}>
+              {source.title || source.id}
+            </span>
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {source.direct
+                ? tx("qa.cases.chainDirect", "直接")
+                : tx("qa.cases.chainViaTestpoint", "经由测试点")}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** One collapsible breadcrumb header row of the grouped case table. */
+function QaGroupHeaderRow({
+  node,
+  collapsed,
+  onToggle,
+}: {
+  node: { path: string; name: string; level: number; count: number };
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <tr className="bg-muted/40" data-testid={`qa-case-group-${node.path || "ungrouped"}`}>
+      <td colSpan={7} className="px-2 py-1">
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 text-left text-[12.5px] font-medium text-foreground"
+          style={{ paddingLeft: `${(node.level - 1) * 14}px` }}
+          onClick={onToggle}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? (
+            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+          )}
+          <span className="truncate">{node.name}</span>
+          <span className="rounded-full bg-background px-1.5 text-[11px] tabular-nums text-muted-foreground ring-1 ring-border/60">
+            {node.count}
+          </span>
+        </button>
+      </td>
+    </tr>
   );
 }
 
@@ -155,6 +304,7 @@ export function QaCaseLibrary({
   const [search, setSearch] = useState("");
   const debouncedSearch = useQaDebouncedValue(search, 250);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportError, setExportError] = useState("");
@@ -175,6 +325,26 @@ export function QaCaseLibrary({
 
   const items = cases.data?.items ?? [];
   const selectedCase = items.find((item) => item.id === selectedId) ?? null;
+  const projectKeys = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.key || project.name])),
+    [projects],
+  );
+  // Cases group by the module of the test point they hang off.  Across projects
+  // the project key becomes the first level, so two `注册界面` groups never mix.
+  const groupRows = useMemo(
+    () =>
+      flattenGroups(
+        buildGroupTree(items, (item) => {
+          const group = item.group ?? "";
+          if (projectId === "all") {
+            return [projectKeys.get(item.project_id) ?? "", group].filter(Boolean).join("/");
+          }
+          return group;
+        }),
+        collapsedGroups,
+      ),
+    [items, projectId, projectKeys, collapsedGroups],
+  );
   const defaultProjectId = useMemo(() => {
     if (projectId !== "all") return projectId;
     return projects[0]?.id ?? "";
@@ -340,7 +510,21 @@ export function QaCaseLibrary({
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => (
+            {groupRows.map((row) => {
+              if (row.kind === "group") {
+                return (
+                  <QaGroupHeaderRow
+                    key={`group:${row.node.path || "ungrouped"}`}
+                    node={row.node}
+                    collapsed={collapsedGroups.has(row.node.path)}
+                    onToggle={() =>
+                      setCollapsedGroups((current) => toggleCollapsed(current, row.node.path))
+                    }
+                  />
+                );
+              }
+              const item = row.item;
+              return (
               <tr
                 key={item.id}
                 className="cursor-pointer hover:bg-muted/30"
@@ -372,13 +556,14 @@ export function QaCaseLibrary({
                   <QaCaseStatusBadge status={item.status} />
                 </td>
                 <td className={QA_TD_CLASS}>
-                  <QaCaseChain item={item} />
+                  <QaCaseChain item={item} onOpen={() => setSelectedId(item.id)} />
                 </td>
                 <td className={QA_TD_CLASS}>
                   <QaTagChips tags={item.tags} />
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </QaTableShell>
       )}
@@ -837,6 +1022,7 @@ function QaCaseDrawer({
           >
             <div className="grid gap-3">
               <QaCaseChain item={current} />
+              <QaCaseChainDetail item={current} />
               <div className="grid grid-cols-2 gap-2">
                 <QaDetailField label={tx("qa.cases.fieldTestpoints", "测试点（逗号分隔）")}>
                   <Input

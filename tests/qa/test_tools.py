@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 import nanobot.qa as qa_package
-from nanobot.qa import shared_store
 from nanobot.agent.tools.qa import (
     QaCaseTool,
     QaOverviewTool,
@@ -18,6 +17,7 @@ from nanobot.agent.tools.qa import (
     QaScriptTool,
     QaTaskTool,
 )
+from nanobot.qa import shared_store
 
 
 @pytest.fixture(autouse=True)

@@ -83,6 +83,24 @@ export interface QaCaseApi {
   variables?: Record<string, string>;
 }
 
+export interface QaCaseTraceTestpoint {
+  id: string;
+  /** Short ordinal shown in lists (`TP-01`); the id stays the real key. */
+  code: string;
+  title: string;
+  /** `模块/页面` breadcrumb. */
+  group: string | null;
+  risk: string;
+}
+
+export interface QaCaseTraceSource {
+  id: string;
+  title: string;
+  type: string;
+  /** The case links this source itself, not through a test point. */
+  direct: boolean;
+}
+
 export interface QaCase {
   id: string;
   project_id: string;
@@ -110,6 +128,12 @@ export interface QaCase {
   testpoints?: string[];
   /** Sources the case hangs off directly (the `来源` chain badge). */
   sources?: string[];
+  /** Breadcrumb group resolved from the linked test point (`登录模块/注册界面`). */
+  group?: string | null;
+  /** Linked test points, resolved with their short code and group. */
+  trace_testpoints?: QaCaseTraceTestpoint[];
+  /** Every source reachable through the test points (the `来源` badge). */
+  trace_sources?: QaCaseTraceSource[];
   direct_reason?: string | null;
   risk?: string | null;
   owner?: string | null;
@@ -459,6 +483,24 @@ function normalizeCase(value: unknown): QaCase {
   if (row.automation !== undefined) case_.automation = text(row.automation);
   if (row.testpoints !== undefined) case_.testpoints = textList(row.testpoints);
   if (row.sources !== undefined) case_.sources = textList(row.sources);
+  if (row.group !== undefined) case_.group = text(row.group) || null;
+  if (Array.isArray(row.trace_testpoints)) {
+    case_.trace_testpoints = row.trace_testpoints.filter(isRecord).map((item) => ({
+      id: text(item.id),
+      code: text(item.code),
+      title: text(item.title),
+      group: text(item.group) || null,
+      risk: text(item.risk),
+    }));
+  }
+  if (Array.isArray(row.trace_sources)) {
+    case_.trace_sources = row.trace_sources.filter(isRecord).map((item) => ({
+      id: text(item.id),
+      title: text(item.title),
+      type: text(item.type),
+      direct: item.direct === true,
+    }));
+  }
   if (row.direct_reason !== undefined) case_.direct_reason = text(row.direct_reason) || null;
   if (row.risk !== undefined) case_.risk = text(row.risk) || null;
   if (row.owner !== undefined) case_.owner = text(row.owner) || null;
@@ -2581,18 +2623,22 @@ export interface QaTraceSource {
 
 export interface QaTraceTestpoint {
   id: string;
+  /** Short ordinal shown in lists (`TP-01`). */
+  code: string;
   title: string;
   sources: string[];
   method: string;
   risk: string;
   status: string;
   module: string | null;
+  /** `模块/页面` breadcrumb; null when the test point was written ungrouped. */
+  group: string | null;
   owner: string | null;
   tags: string[];
   note: string | null;
   case_count: number;
   reviewed_case_count: number;
-  cases: { case_id: string; title: string; status: string }[];
+  cases: { case_id: string; code: string; title: string; status: string }[];
 }
 
 export interface QaTestpointDraft {
@@ -2663,12 +2709,14 @@ export async function loadQaTestpoints(
   const testpoints = Array.isArray(payload.testpoints)
     ? payload.testpoints.filter(isRecord).map((row) => ({
         id: text(row.id),
+        code: text(row.code),
         title: text(row.title),
         sources: textList(row.sources),
         method: text(row.method),
         risk: text(row.risk),
         status: text(row.status),
         module: text(row.module) || null,
+        group: text(row.group) || null,
         owner: text(row.owner) || null,
         tags: textList(row.tags),
         note: text(row.note) || null,
@@ -2677,6 +2725,7 @@ export async function loadQaTestpoints(
         cases: Array.isArray(row.cases)
           ? row.cases.filter(isRecord).map((item) => ({
               case_id: text(item.case_id),
+              code: text(item.code),
               title: text(item.title),
               status: text(item.status),
             }))

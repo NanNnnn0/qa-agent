@@ -104,7 +104,11 @@ def source_payload(source: Source) -> dict[str, Any]:
 
 
 def testpoint_payload(testpoint: TestPoint) -> dict[str, Any]:
-    """Return the hashed business fields of a test point."""
+    """Return the hashed business fields of a test point.
+
+    ``group`` is a display breadcrumb, not business content: moving a test point
+    between modules must not invalidate the review of the cases under it.
+    """
     return {
         "schema_version": testpoint.schema_version,
         "id": testpoint.id,
