@@ -22,13 +22,16 @@ import { cn } from "@/lib/utils";
 import { QaDetailDrawer, QaDetailSection } from "./QaDetailDrawer";
 import {
   QaBadge,
+  QaCaseStatusBadge,
   QaErrorBar,
   QaLoading,
   QaPre,
+  QaPriorityBadge,
   QaSectionTitle,
   QA_TD_CLASS,
   QA_TH_CLASS,
   formatQaTime,
+  qaKindLabel,
   useQaCopy,
 } from "./qa-ui";
 import { useQaQuery } from "./useQaQuery";
@@ -55,18 +58,6 @@ function normalizePath(path: string): string {
 
 function operationKey(projectId: string, method: string, path: string): string {
   return `${projectId}|${method.toUpperCase()}|${normalizePath(path)}`;
-}
-
-function priorityTone(priority: QaCase["priority"]) {
-  if (priority === "P0") return "red" as const;
-  if (priority === "P1") return "amber" as const;
-  return "neutral" as const;
-}
-
-function caseStatusTone(status: QaCase["status"]) {
-  if (status === "ready") return "green" as const;
-  if (status === "deprecated") return "neutral" as const;
-  return "amber" as const;
 }
 
 /**
@@ -295,31 +286,63 @@ export function QaApiAssets({
                               )}
                             </p>
                           ) : (
-                            <ul className="flex flex-col gap-1">
-                              {linked.map((qaCase) => (
-                                <li key={qaCase.id}>
-                                  <button
-                                    type="button"
+                            <table className="w-full min-w-[34rem] border-collapse">
+                              <thead>
+                                <tr>
+                                  <th className={QA_TH_CLASS}>{tx("qa.cases.code", "编号")}</th>
+                                  <th className={QA_TH_CLASS}>{tx("qa.cases.name", "标题")}</th>
+                                  <th className={QA_TH_CLASS}>{tx("qa.cases.kind", "类型")}</th>
+                                  <th className={QA_TH_CLASS}>{tx("qa.cases.priority", "优先级")}</th>
+                                  <th className={QA_TH_CLASS}>{tx("qa.cases.status", "状态")}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {linked.map((qaCase) => (
+                                  <tr
+                                    key={qaCase.id}
                                     data-testid={`qa-api-case-${qaCase.id}`}
                                     onClick={() => setSelectedCaseId(qaCase.id)}
-                                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/60"
+                                    className="cursor-pointer hover:bg-accent/40"
                                   >
-                                    <span className="font-mono text-[11.5px] text-muted-foreground">
+                                    <td
+                                      className={cn(
+                                        QA_TD_CLASS,
+                                        "font-mono text-[12px] text-muted-foreground",
+                                      )}
+                                    >
                                       {qaCase.code}
-                                    </span>
-                                    <span className="flex-1 truncate text-[12.5px]">
-                                      {qaCase.title}
-                                    </span>
-                                    <QaBadge tone={priorityTone(qaCase.priority)}>
-                                      {qaCase.priority}
-                                    </QaBadge>
-                                    <QaBadge tone={caseStatusTone(qaCase.status)}>
-                                      {qaCase.status}
-                                    </QaBadge>
-                                  </button>
-                                </li>
-                              ))}
-                            </ul>
+                                    </td>
+                                    <td className={QA_TD_CLASS}>
+                                      <button
+                                        type="button"
+                                        className="block max-w-[26rem] truncate text-left font-medium text-foreground hover:underline"
+                                        title={qaCase.title}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setSelectedCaseId(qaCase.id);
+                                        }}
+                                      >
+                                        {qaCase.title || qaCase.code}
+                                      </button>
+                                    </td>
+                                    <td
+                                      className={cn(
+                                        QA_TD_CLASS,
+                                        "text-[12px] text-muted-foreground",
+                                      )}
+                                    >
+                                      {qaKindLabel(qaCase.kind, tx)}
+                                    </td>
+                                    <td className={QA_TD_CLASS}>
+                                      <QaPriorityBadge priority={qaCase.priority} />
+                                    </td>
+                                    <td className={QA_TD_CLASS}>
+                                      <QaCaseStatusBadge status={qaCase.status} />
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
                           )}
                         </td>
                       </tr>
@@ -379,29 +402,6 @@ export function QaApiAssets({
         ) : (
           <>
             <QaDetailSection
-              title={tx("qa.assets.cases", "用例")}
-              hint={String((casesByOperation.get(selected.id) ?? []).length)}
-            >
-              {(casesByOperation.get(selected.id) ?? []).length === 0 ? (
-                <p className="text-[12px] text-muted-foreground">
-                  {tx("qa.assets.noCases", "这个接口下还没有用例。用 qa_api_workflow 提交候选批次后，用例会挂在这里。")}
-                </p>
-              ) : (
-                <ul className="flex flex-col gap-1">
-                  {(casesByOperation.get(selected.id) ?? []).map((qaCase) => (
-                    <li key={qaCase.id} className="flex items-center gap-2 text-[12px]">
-                      <span className="font-mono text-[11.5px] text-muted-foreground">
-                        {qaCase.code}
-                      </span>
-                      <span className="flex-1 truncate">{qaCase.title}</span>
-                      <QaBadge tone={priorityTone(qaCase.priority)}>{qaCase.priority}</QaBadge>
-                      <QaBadge tone={caseStatusTone(qaCase.status)}>{qaCase.status}</QaBadge>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </QaDetailSection>
-            <QaDetailSection
               title={tx("qa.assets.evidence", "证据")}
               hint={String(selected.evidence?.length ?? 0)}
             >
@@ -445,14 +445,15 @@ export function QaApiAssets({
         }
         description={selectedCase?.code || ""}
         badge={
-          selectedCase ? (
-            <QaBadge tone={caseStatusTone(selectedCase.status)}>{selectedCase.status}</QaBadge>
-          ) : null
+          selectedCase ? <QaCaseStatusBadge status={selectedCase.status} /> : null
         }
         meta={
           selectedCase
             ? [
-                { label: tx("qa.assets.caseKind", "类型"), value: selectedCase.kind },
+                {
+                  label: tx("qa.assets.caseKind", "类型"),
+                  value: qaKindLabel(selectedCase.kind, tx),
+                },
                 {
                   label: tx("qa.assets.casePriority", "优先级"),
                   value: selectedCase.priority,

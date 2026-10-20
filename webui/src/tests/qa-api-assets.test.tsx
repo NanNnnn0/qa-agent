@@ -118,6 +118,20 @@ describe("API asset catalog view", () => {
     expect(within(panel).getByText("SHOP-API-001")).toBeInTheDocument();
     expect(within(panel).getByText("create an order")).toBeInTheDocument();
     expect(within(panel).queryByText("SHOP-API-003")).not.toBeInTheDocument();
+    // The nested list mirrors the case library columns minus chain and tags.
+    expect(within(panel).getAllByRole("columnheader")).toHaveLength(5);
+    expect(within(panel).getByText("P0")).toBeInTheDocument();
+    expect(within(panel).getByText(/就绪|ready/i)).toBeInTheDocument();
+  });
+
+  it("does not repeat the case list in the operation drawer", async () => {
+    render(<QaApiAssets token="test" projects={[]} refreshSignal={0} />);
+    fireEvent.click(await screen.findByTestId("qa-api-operation-op-1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("qa-api-operation-drawer")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("qa-api-case-case-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("SHOP-API-001")).not.toBeInTheDocument();
   });
 
   it("matches a case with a concrete path parameter", async () => {
