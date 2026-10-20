@@ -1906,7 +1906,10 @@ function Shell({
       }
       return null;
     }
-  }, [activeWorkspaceScope, createChat, navigate, t]);
+    // `draftQaProjectId` is read inside, so it must be a dependency: without it
+    // the callback keeps the first render's `null` and a topic started from a
+    // QA project was created unbound (it showed up under 总调度 instead).
+  }, [activeWorkspaceScope, createChat, draftQaProjectId, navigate, t]);
 
   const onStartAutomationChat = useCallback(async (
     content: string,

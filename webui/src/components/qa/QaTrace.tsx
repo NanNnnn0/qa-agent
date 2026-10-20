@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, GitBranch, RefreshCw, Search, X } from "lucide-react";
+import { Check, RefreshCw, Search, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { QaDetailDrawer, QaDetailSection } from "./QaDetailDrawer";
@@ -21,7 +21,6 @@ import {
   rejectQaTraceReview,
   writeQaTraceBaseline,
   type QaMutationTransport,
-  type QaTraceCaseNode,
   type QaTraceCoverageBlock,
   type QaCase,
   type QaTraceDraft,
@@ -29,7 +28,6 @@ import {
   type QaTraceImpact,
   type QaTraceRatio,
   type QaTraceRunSummary,
-  type QaTraceSourceNode,
   type QaTraceStale,
   type QaTraceSummary,
   type QaTraceTree,
@@ -402,15 +400,7 @@ export function QaTrace({ token, client, refreshSignal }: QaTraceProps) {
 
           <div className="grid gap-4 xl:grid-cols-2">
             <div className="flex flex-col gap-4">
-              <TraceTreePanel
-                query={treeQuery}
-                onOpenCase={openCase}
-                onPickImpact={(kind, id) => {
-                  setImpactKind(kind);
-                  setImpactInput(id);
-                  setImpactTarget({ kind, id });
-                }}
-              />
+              <TraceGapsPanel query={treeQuery} onOpenCase={openCase} />
               <TraceImpactPanel
                 impact={impactQuery.data}
                 loading={impactQuery.loading}
@@ -624,50 +614,98 @@ function TraceMetrics({ summary }: { summary: QaTraceSummary | null }) {
   );
 }
 
-// -- chain tree -----------------------------------------------------------
+// -- coverage gaps --------------------------------------------------------
 
-function TraceTreePanel({
+/** What the chain is missing, not what it already contains.
+ *
+ * Every case in the library is linked by construction (a ready case must hang
+ * off a test point), so drawing the whole chain produced a tree that could only
+ * ever be complete - it told the operator nothing.  This panel answers the
+ * question that does change: which source has no test point, which test point
+ * has no case, and which case has no link at all.
+ */
+function TraceGapsPanel({
   query,
-  onPickImpact,
   onOpenCase,
 }: {
   query: ReturnType<typeof useQaQuery<QaTraceTree>>;
-  onPickImpact: (kind: "source" | "case", id: string) => void;
   onOpenCase: (id: string) => void;
 }) {
   const tx = useQaCopy();
-  const [open, setOpen] = useState(false);
   const tree = query.data;
+  const gaps = useMemo(() => {
+    const sources: { id: string; title: string; hint: string }[] = [];
+    const testpoints: { id: string; title: string; hint: string }[] = [];
+    for (const source of tree?.sources ?? []) {
+      if (source.testpoints.length === 0) {
+        sources.push({ id: source.id, title: source.title, hint: source.id });
+      }
+      for (const testpoint of source.testpoints) {
+        if (testpoint.cases.length > 0) continue;
+        if (testpoints.some((item) => item.id === testpoint.id)) continue;
+        testpoints.push({
+          id: testpoint.id,
+          title: testpoint.title,
+          hint: `${testpoint.id} · ${source.id}`,
+        });
+      }
+    }
+    return { sources, testpoints, orphans: tree?.orphans ?? [] };
+  }, [tree]);
+  const total = gaps.sources.length + gaps.testpoints.length + gaps.orphans.length;
+
+  const chip = (
+    item: { id: string; title: string; hint: string },
+    onOpen?: (id: string) => void,
+  ) => {
+    const body = (
+      <>
+        <span className="font-mono text-muted-foreground">{item.id}</span>
+        <span className="ml-1.5">{item.title}</span>
+      </>
+    );
+    if (!onOpen) {
+      return (
+        <span
+          className="inline-flex items-center rounded-full border border-border/60 bg-card px-2 py-0.5 text-[11.5px]"
+          title={item.hint}
+        >
+          {body}
+        </span>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="inline-flex items-center rounded-full border border-border/60 bg-card px-2 py-0.5 text-[11.5px] hover:bg-accent/40"
+        title={item.hint}
+        onClick={() => onOpen(item.id)}
+      >
+        {body}
+      </button>
+    );
+  };
+
+  const group = (
+    key: string,
+    label: string,
+    items: { id: string; title: string; hint: string }[],
+    onOpen?: (id: string) => void,
+  ) =>
+    items.length === 0 ? null : (
+      <div key={key} className="flex flex-col gap-1" data-testid={`qa-trace-gaps-${key}`}>
+        <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+        <ul className="flex flex-wrap gap-1.5">
+          {items.map((item) => (
+            <li key={item.id}>{chip(item, onOpen)}</li>
+          ))}
+        </ul>
+      </div>
+    );
+
   return (
     <QaPanel className="px-4 py-3">
-      <QaSectionTitle
-        title={tx("qa.trace.tree.title", "追溯链")}
-        count={tree?.counts.cases}
-        action={
-          <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            {tree
-              ? tx("qa.trace.tree.counts", "{{sources}} 来源 · {{testpoints}} 测试点 · {{scripts}} 脚本", {
-                  sources: tree.counts.sources,
-                  testpoints: tree.counts.testpoints,
-                  scripts: tree.counts.scripts,
-                })
-              : null}
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-6 px-1.5 text-[11px]"
-              onClick={() => setOpen((value) => !value)}
-              data-testid="qa-trace-tree-toggle"
-            >
-              {open
-                ? tx("qa.trace.tree.collapse", "收起")
-                : tx("qa.trace.tree.expand", "展开")}
-            </Button>
-          </span>
-        }
-      />
-      <div className={open ? "flex flex-col gap-2" : "hidden"}>
+      <QaSectionTitle title={tx("qa.trace.gaps.title", "覆盖缺口")} count={total} />
       {query.error ? (
         <QaErrorBar
           message={`${tx("qa.trace.error.tree", "加载追溯链失败")}: ${query.error}`}
@@ -676,205 +714,33 @@ function TraceTreePanel({
         />
       ) : query.loading && !tree ? (
         <QaLoading label={tx("qa.status.loading", "加载中…")} />
-      ) : !tree || tree.sources.length === 0 ? (
-        <QaEmptyState
-          testId="qa-trace-tree-empty"
-          title={tx("qa.trace.tree.empty", "这个库还没有来源")}
-          hint={tx(
-            "qa.trace.tree.emptyHint",
-            "先在 sources/ 里写一条带证据的 REQ/UI/API 来源，再挂测试点与用例。",
-          )}
-        />
-      ) : (
-        <ul className="flex flex-col gap-3" data-testid="qa-trace-tree">
-          {tree.sources.map((source) => (
-            <SourceRow
-              key={source.id}
-              source={source}
-              onPickImpact={onPickImpact}
-              onOpenCase={onOpenCase}
-            />
-          ))}
-          {tree.orphans.length > 0 ? (
-            <li
-              data-testid="qa-trace-orphans"
-              className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2"
-            >
-              <p className="text-[12.5px] font-medium text-destructive">
-                {tx("qa.trace.tree.orphans", "无法上溯到来源的用例（{{count}}）", {
-                  count: tree.orphans.length,
-                })}
-              </p>
-              <ul className="mt-1 flex flex-col gap-1">
-                {tree.orphans.map((item) => (
-                  <li key={item.id} className="font-mono text-[12px] text-muted-foreground">
-                    {item.id} · {item.title}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ) : null}
-        </ul>
-      )}
-      </div>
-    </QaPanel>
-  );
-}
-
-function SourceRow({
-  source,
-  onPickImpact,
-  onOpenCase,
-}: {
-  source: QaTraceSourceNode;
-  onPickImpact: (kind: "source" | "case", id: string) => void;
-  onOpenCase: (id: string) => void;
-}) {
-  const tx = useQaCopy();
-  return (
-    <li
-      data-testid={`qa-trace-source-${source.id}`}
-      className="rounded-lg border border-border/60 bg-card px-3 py-2"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <QaBadge tone="violet" className="font-mono">
-          {source.type}
-        </QaBadge>
-        <button
-          type="button"
-          className="font-mono text-[12.5px] font-semibold text-foreground hover:underline"
-          onClick={() => onPickImpact("source", source.id)}
-          title={tx("qa.trace.tree.impactHint", "查看影响面")}
-        >
-          {source.id}
-        </button>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted-foreground" title={source.title}>
-          {source.title}
-        </span>
-        <QaBadge tone={REVIEW_TONE[source.status] ?? "neutral"}>
-          {REVIEW_LABEL[source.status] ?? source.status}
-        </QaBadge>
-        <QaBadge tone={source.confidence === "confirmed" ? "blue" : "amber"}>
-          {source.confidence === "confirmed"
-            ? tx("qa.trace.confidence.confirmed", "已确认")
-            : tx("qa.trace.confidence.observed", "仅观测")}
-        </QaBadge>
-        {source.stale ? (
-          <QaBadge tone="red" dot>
-            {tx("qa.trace.badge.stale", "已过期")}
-          </QaBadge>
-        ) : null}
-      </div>
-      {source.testpoints.length === 0 && source.cases.length === 0 ? (
-        <p className="mt-1 text-[12px] text-muted-foreground">
-          {tx("qa.trace.tree.noDownstream", "没有下游测试点或用例（可能漏测）")}
-        </p>
-      ) : null}
-      <ul className="mt-2 flex flex-col gap-2 border-l border-border/60 pl-3">
-        {source.testpoints.map((testpoint) => (
-          <li key={testpoint.id} data-testid={`qa-trace-testpoint-${testpoint.id}`}>
-            <div className="flex flex-wrap items-center gap-2">
-              <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="font-mono text-[12px] font-medium text-foreground">{testpoint.id}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground" title={testpoint.title}>
-                {testpoint.title}
-              </span>
-              <QaBadge tone={REVIEW_TONE[testpoint.status] ?? "neutral"}>
-                {REVIEW_LABEL[testpoint.status] ?? testpoint.status}
-              </QaBadge>
-              <QaBadge tone="neutral">{testpoint.risk}</QaBadge>
-            </div>
-            {testpoint.cases.length === 0 ? (
-              <p className="mt-1 pl-5 text-[12px] text-muted-foreground">
-                {tx("qa.trace.tree.noCases", "没有用例覆盖这个测试点")}
-              </p>
-            ) : (
-              <ul className="mt-1 flex flex-col gap-1 pl-5">
-                {testpoint.cases.map((item) => (
-                  <CaseRow
-                    key={item.id}
-                    item={item}
-                    onPickImpact={onPickImpact}
-                    onOpenCase={onOpenCase}
-                  />
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
-        {source.cases.map((item) => (
-          <CaseRow
-            key={item.id}
-            item={item}
-            onPickImpact={onPickImpact}
-            onOpenCase={onOpenCase}
-          />
-        ))}
-      </ul>
-    </li>
-  );
-}
-
-function CaseRow({
-  item,
-  onPickImpact,
-  onOpenCase,
-}: {
-  item: QaTraceCaseNode;
-  onPickImpact: (kind: "source" | "case", id: string) => void;
-  onOpenCase: (id: string) => void;
-}) {
-  const tx = useQaCopy();
-  return (
-    <li data-testid={`qa-trace-case-${item.id}`} className="rounded-md bg-muted/30 px-2 py-1.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="font-mono text-[12px] font-medium text-foreground hover:underline"
-          onClick={() => onPickImpact("case", item.id)}
-          title={tx("qa.trace.tree.impactHint", "查看影响面")}
-        >
-          {item.id}
-        </button>
-        <button
-          type="button"
-          className="min-w-0 flex-1 truncate text-left text-[12px] text-muted-foreground hover:underline"
-          title={item.title}
-          onClick={() => onOpenCase(item.id)}
-          data-testid={`qa-trace-case-open-${item.id}`}
-        >
-          {item.title}
-        </button>
-        <QaPriorityBadge priority={item.priority as "P0" | "P1" | "P2" | "P3"} />
-        <QaBadge tone={REVIEW_TONE[item.status] ?? "neutral"}>
-          {REVIEW_LABEL[item.status] ?? item.status}
-        </QaBadge>
-        {item.needs_recheck ? (
-          <QaBadge
-            tone="amber"
-            dot
-            title={item.recheck_reasons.map(reasonText).join("，") || undefined}
-          >
-            {tx("qa.trace.badge.needsRecheck", "待复核")}
-          </QaBadge>
-        ) : null}
-        {item.automation === "manual" ? (
-          <QaBadge tone="neutral">{tx("qa.trace.badge.manual", "手工")}</QaBadge>
-        ) : null}
-      </div>
-      {item.script ? (
+      ) : total === 0 ? (
         <p
-          className={cn(
-            "mt-0.5 truncate font-mono text-[11px]",
-            item.script.resolves ? "text-muted-foreground" : "text-destructive",
-          )}
-          title={item.script.problem || item.script.binding}
+          data-testid="qa-trace-gaps-empty"
+          className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-[12px] text-muted-foreground"
         >
-          {item.script.binding}
-          {item.script.resolves ? "" : ` · ${item.script.problem}`}
+          {tx(
+            "qa.trace.gaps.none",
+            "没有缺口：每条来源都有测试点，每个测试点都有用例。链路本身在「测试点」页签按模块分层看。",
+          )}
         </p>
-      ) : null}
-    </li>
+      ) : (
+        <div className="flex flex-col gap-2" data-testid="qa-trace-gaps">
+          {group("sources", tx("qa.trace.gaps.sources", "来源没有测试点"), gaps.sources)}
+          {group("testpoints", tx("qa.trace.gaps.testpoints", "测试点没有用例"), gaps.testpoints)}
+          {group(
+            "orphans",
+            tx("qa.trace.gaps.orphans", "用例没有链路"),
+            gaps.orphans.map((item) => ({
+              id: item.id,
+              title: item.title,
+              hint: item.id,
+            })),
+            onOpenCase,
+          )}
+        </div>
+      )}
+    </QaPanel>
   );
 }
 

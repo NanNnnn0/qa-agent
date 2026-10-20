@@ -471,7 +471,7 @@ afterEach(() => {
 });
 
 describe("QA trace tab", () => {
-  it("renders the four separate metrics and the source -> testpoint -> case chain", async () => {
+  it("renders the four separate metrics and the coverage gaps", async () => {
     renderTrace();
 
     // Four metrics, each on its own card: never merged into one number.
@@ -483,19 +483,9 @@ describe("QA trace tab", () => {
     expect(screen.getByTestId("qa-trace-metric-automation")).toHaveTextContent("100.00%");
     expect(screen.getByTestId("qa-trace-metric-orphan")).toHaveTextContent("0.00%");
 
-    const tree = await screen.findByTestId("qa-trace-tree");
-    expect(within(tree).getByText("REQ-LOGIN-01")).toBeInTheDocument();
-    expect(within(tree).getByText("UI-LOGIN-02")).toBeInTheDocument();
-    // TP-LOGIN-005 hangs off both sources, so it appears under each of them.
-    expect(within(tree).getAllByText("TP-LOGIN-005").length).toBeGreaterThan(0);
-    expect(within(tree).getAllByText("TC-LOGIN-003").length).toBeGreaterThan(0);
-    // The script binding is part of the chain, not a separate page.
-    expect(
-      within(tree).getAllByText("scripts/test_login.py::test_lock_after_5_failures").length,
-    ).toBeGreaterThan(0);
-    // Status badges: reviewed plus the derived re-check marker.
-    expect(within(tree).getAllByText("已审核").length).toBeGreaterThan(0);
-    expect(within(tree).getAllByText("待复核").length).toBeGreaterThan(0);
+    // The global tree is gone: a linked-only library could only ever show a
+    // complete chain.  What is left is the gap list, empty for this fixture.
+    expect(await screen.findByTestId("qa-trace-gaps-empty")).toBeInTheDocument();
 
     // Stale panel lists the derived re-check with its reason.
     const stale = await screen.findByTestId("qa-trace-stale");
@@ -525,7 +515,7 @@ describe("QA trace tab", () => {
     const user = userEvent.setup();
     renderTrace();
 
-    await screen.findByTestId("qa-trace-tree");
+    await screen.findByTestId("qa-trace-gaps-empty");
     await user.type(screen.getByTestId("qa-trace-impact-input"), "REQ-LOGIN-01");
     await user.click(screen.getByTestId("qa-trace-impact-submit"));
 
