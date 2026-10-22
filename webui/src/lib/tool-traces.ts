@@ -23,6 +23,25 @@ export function formatToolCallTrace(call: unknown): string | null {
   return `${name}()`;
 }
 
+export interface ToolTraceCall {
+  name: string;
+  arguments: unknown;
+}
+
+/** Parse one persisted `tool(args)` trace line for the detail panel. */
+export function parseToolTraceCall(line: string): ToolTraceCall | null {
+  const match = /^([a-zA-Z0-9_.-]+)\(([\s\S]*)\)$/.exec(line.trim());
+  if (!match) return null;
+  const name = match[1].toLowerCase().split(".").pop() || match[1].toLowerCase();
+  const argsText = match[2].trim();
+  if (!argsText) return { name, arguments: {} };
+  try {
+    return { name, arguments: JSON.parse(argsText) };
+  } catch {
+    return { name, arguments: argsText };
+  }
+}
+
 export function canonicalToolTrace(line: string): string {
   const trimmed = line.trim();
   const match = /^([a-zA-Z0-9_.-]+)\((.*)\)$/.exec(trimmed);

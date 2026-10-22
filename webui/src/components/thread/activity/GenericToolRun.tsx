@@ -17,6 +17,11 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ActivityStep } from "@/components/thread/activity/ActivityStep";
+import { ToolCallDetail } from "@/components/thread/activity/ToolCallDetail";
+import {
+  buildToolCallDetailEntry,
+  hasToolCallDetail,
+} from "@/components/thread/activity/tool-detail-model";
 import {
   describeGenericToolRun,
   type GenericToolRunItem,
@@ -37,6 +42,15 @@ export function GenericToolRun({ items }: { items: GenericToolRunItem[] }) {
   const { t } = useTranslation();
   const model = useMemo(() => buildModel(items, t), [items, t]);
   const action = formatActivityTarget(t, model.label, model.detail);
+  const detailEntries = items.map((item) => buildToolCallDetailEntry(
+    item.trace.name,
+    item.arguments,
+    item.result,
+    item.error,
+  ));
+  const details = hasToolCallDetail(detailEntries)
+    ? <ToolCallDetail entries={detailEntries} />
+    : undefined;
 
   return (
     <ActivityStep
@@ -45,6 +59,7 @@ export function GenericToolRun({ items }: { items: GenericToolRunItem[] }) {
       tone={model.status === "error" ? "error" : model.status === "done" ? "success" : "active"}
       label={action}
       detail={model.aside}
+      details={details}
     />
   );
 }

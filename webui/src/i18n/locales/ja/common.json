@@ -2216,6 +2216,16 @@
     "activityShow": "処理過程を表示",
     "activityShowFor": "処理過程を表示 {{duration}}",
     "activityHide": "処理過程を非表示",
+    "toolDetail": {
+      "arguments": "引数",
+      "command": "コマンド",
+      "result": "結果",
+      "error": "エラー",
+      "copy": "コピー",
+      "copied": "コピーしました",
+      "showAll": "すべて表示",
+      "showLess": "折りたたむ"
+    },
     "traceDetailsLoadFailed": "アクティビティの詳細を読み込めませんでした。",
     "retryTraceDetails": "再試行",
     "retryConnection": "接続に失敗しました",

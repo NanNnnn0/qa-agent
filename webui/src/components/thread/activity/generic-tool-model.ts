@@ -37,6 +37,9 @@ export interface GenericToolRunItem {
   trace: GenericToolTrace;
   status: GenericToolStatus;
   error?: string;
+  /** Raw call arguments and result, kept for the expandable detail panel. */
+  arguments?: unknown;
+  result?: unknown;
 }
 
 export interface GenericToolPresentation {

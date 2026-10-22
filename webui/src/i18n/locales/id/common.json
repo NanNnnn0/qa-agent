@@ -2216,6 +2216,16 @@
     "activityShow": "Lihat aktivitas",
     "activityShowFor": "Lihat aktivitas {{duration}}",
     "activityHide": "Sembunyikan aktivitas",
+    "toolDetail": {
+      "arguments": "Argumen",
+      "command": "Perintah",
+      "result": "Hasil",
+      "error": "Kesalahan",
+      "copy": "Salin",
+      "copied": "Tersalin",
+      "showAll": "Tampilkan semua",
+      "showLess": "Tampilkan lebih sedikit"
+    },
     "traceDetailsLoadFailed": "Detail aktivitas lengkap tidak dapat dimuat.",
     "retryTraceDetails": "Coba lagi",
     "retryConnection": "Koneksi gagal",

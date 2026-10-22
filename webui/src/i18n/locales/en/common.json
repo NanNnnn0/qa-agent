@@ -2388,6 +2388,16 @@
     "activityShow": "View activity",
     "activityShowFor": "View activity {{duration}}",
     "activityHide": "Hide activity",
+    "toolDetail": {
+      "arguments": "Arguments",
+      "command": "Command",
+      "result": "Result",
+      "error": "Error",
+      "copy": "Copy",
+      "copied": "Copied",
+      "showAll": "Show all",
+      "showLess": "Show less"
+    },
     "traceDetailsLoadFailed": "Full activity details could not be loaded.",
     "retryTraceDetails": "Retry",
     "retryConnection": "Connection failed",

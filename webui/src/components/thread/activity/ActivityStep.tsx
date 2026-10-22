@@ -1,5 +1,5 @@
-import { useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { LucideIcon } from "lucide-react";
+import { useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { ChevronRight, type LucideIcon } from "lucide-react";
 
 import { StreamingLabelSheen } from "@/components/ui/streaming-label-sheen";
 import { formControlFocusClassName } from "@/components/ui/form-control";
@@ -25,6 +25,8 @@ export interface ActivityStepProps {
   labelClassName?: string;
   markerClassName?: string;
   style?: CSSProperties;
+  /** Expandable payload rendered under the row: tool arguments, output, errors. */
+  details?: ReactNode;
 }
 
 export function ActivityStep({
@@ -44,21 +46,20 @@ export function ActivityStep({
   labelClassName,
   markerClassName,
   style,
+  details,
 }: ActivityStepProps) {
-  const lineRef = useRef<HTMLDivElement>(null);
+  const lineRef = useRef<HTMLElement | null>(null);
   const [hintOpen, setHintOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
+  const expandable = details !== undefined && details !== null;
   const textLabel = typeof label === "string" ? [label, detail].filter(Boolean).join("\n") : undefined;
-  const line = (
-    <div
-      ref={lineRef}
-      data-testid="activity-line"
-      tabIndex={typeof label === "string" ? 0 : undefined}
-      aria-label={detail && typeof label === "string" ? `${label}, ${detail}` : undefined}
-      className={cn(
-        "flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap",
-        formControlFocusClassName,
-      )}
-    >
+  const lineClassName = cn(
+    "flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap",
+    formControlFocusClassName,
+  );
+  const lineContent = (
+    <>
       <span className={cn("flex min-w-0 flex-1 items-baseline", detail && "gap-2")}>
         <StreamingLabelSheen
           active={active && animateLabel}
@@ -78,6 +79,44 @@ export function ActivityStep({
           </>
         ) : null}
       </span>
+      {expandable ? (
+        <ChevronRight
+          aria-hidden
+          strokeWidth={2}
+          className={cn(
+            "h-3 w-3 shrink-0 text-muted-foreground/40 transition-transform duration-150",
+            detailsOpen && "rotate-90",
+          )}
+        />
+      ) : null}
+    </>
+  );
+  const line = expandable ? (
+    <button
+      ref={(node) => { lineRef.current = node; }}
+      type="button"
+      data-testid="activity-line"
+      aria-expanded={detailsOpen}
+      aria-controls={detailsId}
+      aria-label={detail && typeof label === "string" ? `${label}, ${detail}` : undefined}
+      onClick={() => setDetailsOpen((open) => !open)}
+      className={cn(
+        lineClassName,
+        "-mx-1 w-[calc(100%+0.5rem)] rounded-md px-1 text-left",
+        "media-hover:hover:bg-muted/50",
+      )}
+    >
+      {lineContent}
+    </button>
+  ) : (
+    <div
+      ref={(node) => { lineRef.current = node; }}
+      data-testid="activity-line"
+      tabIndex={typeof label === "string" ? 0 : undefined}
+      aria-label={detail && typeof label === "string" ? `${label}, ${detail}` : undefined}
+      className={lineClassName}
+    >
+      {lineContent}
     </div>
   );
 
@@ -127,6 +166,11 @@ export function ActivityStep({
             </Tooltip>
           </TooltipProvider>
         ) : line}
+        {expandable && detailsOpen ? (
+          <div id={detailsId} className="min-w-0">
+            {details}
+          </div>
+        ) : null}
       </div>
     </div>
   );

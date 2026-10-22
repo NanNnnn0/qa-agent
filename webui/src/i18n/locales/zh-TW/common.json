@@ -2218,6 +2218,16 @@
     "activityShow": "查看過程",
     "activityShowFor": "查看過程 {{duration}}",
     "activityHide": "收合過程",
+    "toolDetail": {
+      "arguments": "參數",
+      "command": "指令",
+      "result": "結果",
+      "error": "錯誤",
+      "copy": "複製",
+      "copied": "已複製",
+      "showAll": "顯示全部",
+      "showLess": "收合"
+    },
     "traceDetailsLoadFailed": "無法載入完整活動詳情。",
     "retryTraceDetails": "重試",
     "retryConnection": "連線失敗",

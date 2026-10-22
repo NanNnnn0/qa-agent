@@ -28,6 +28,11 @@ import {
 } from "@/components/thread/activity/activity-text";
 import { FileEditGroup, type FileEditSummary } from "@/components/thread/activity/FileEditRow";
 import { GenericToolRun } from "@/components/thread/activity/GenericToolRun";
+import { ToolCallDetail } from "@/components/thread/activity/ToolCallDetail";
+import {
+  buildToolCallDetailEntry,
+  hasToolCallDetail,
+} from "@/components/thread/activity/tool-detail-model";
 import {
   canGroupGenericToolRuns,
   type GenericToolRunItem,
@@ -54,7 +59,7 @@ import { usePageVisibility } from "@/hooks/usePageVisibility";
 import { useThreadVisibility } from "@/hooks/useThreadVisibility";
 import type { FileEditDisplayMode } from "@/lib/local-preferences";
 import { logoFallbackUrls } from "@/lib/provider-brand";
-import { canonicalToolTrace, formatToolCallTrace } from "@/lib/tool-traces";
+import { canonicalToolTrace, formatToolCallTrace, parseToolTraceCall } from "@/lib/tool-traces";
 import { cn } from "@/lib/utils";
 import type {
   CliAppInfo,
@@ -87,6 +92,7 @@ interface CliRunSummary {
   workingDir?: string;
   status: CliRunStatus;
   error?: string;
+  result?: unknown;
 }
 
 type CliRunStatus = "running" | "done" | "error";
@@ -100,6 +106,7 @@ interface McpRunSummary {
   args: unknown;
   status: McpRunStatus;
   error?: string;
+  result?: unknown;
 }
 
 function countActivity(
@@ -640,6 +647,8 @@ function ActivityTraceList({
         trace,
         status: explicitState?.status === "running" && !active ? "done" : explicitState?.status ?? fallbackStatus,
         error: explicitState?.error,
+        arguments: parseToolTraceCall(line)?.arguments,
+        result: explicitState?.result,
       };
       const previous = genericItems[genericItems.length - 1];
       if (previous && !canGroupGenericToolRuns(previous, item)) flushGenericItems(String(index));
@@ -804,6 +813,13 @@ function ActivityTraceRow({
   const status = state?.status ?? (active ? "running" : "done");
   const trace = describeTraceLine(line, status, t, state?.result);
   const rowActive = status === "running" && active;
+  const call = parseToolTraceCall(line);
+  const detailEntries = call
+    ? [buildToolCallDetailEntry(call.name, call.arguments, state?.result, state?.error)]
+    : [];
+  const details = hasToolCallDetail(detailEntries)
+    ? <ToolCallDetail entries={detailEntries} />
+    : undefined;
   const Icon = trace.icon === "clock" ? Clock3 : (trace.kind === "search"
     ? WebSearchIcon
     : trace.kind === "done"
@@ -831,6 +847,7 @@ function ActivityTraceRow({
       label={trace.kind === "search" ? trace.label : formatActivityTarget(t, trace.label, trace.detail)}
       detail={trace.kind === "search" ? trace.detail : trace.aside}
       detailClassName={trace.kind === "search" ? "whitespace-pre-line" : undefined}
+      details={details}
     />
   );
 }
@@ -952,7 +969,7 @@ function toolEventName(event: ToolProgressEvent): string {
 
 function cliRunFromArguments(
   argsObject: unknown,
-  options: { key: string; status: CliRunStatus; error?: string },
+  options: { key: string; status: CliRunStatus; error?: string; result?: unknown },
 ): CliRunSummary {
   if (!argsObject || typeof argsObject !== "object" || Array.isArray(argsObject)) {
     return {
@@ -962,6 +979,7 @@ function cliRunFromArguments(
       json: false,
       status: options.status,
       error: options.error,
+      result: options.result,
     };
   }
   const record = argsObject as Record<string, unknown>;
@@ -978,6 +996,7 @@ function cliRunFromArguments(
     workingDir: typeof record.working_dir === "string" ? record.working_dir : undefined,
     status: options.status,
     error: options.error,
+    result: options.result,
   };
 }
 
@@ -990,6 +1009,7 @@ function cliRunFromEvent(event: ToolProgressEvent): CliRunSummary | null {
     key,
     status: cliRunStatusFromPhase(event.phase),
     error: cliRunError(event),
+    result: event.result,
   });
 }
 
@@ -1053,7 +1073,7 @@ const PRODUCT_NAME_OVERRIDES: Record<string, string> = {
 function mcpRunFromToolName(
   toolName: string,
   argsObject: unknown,
-  options: { key: string; status: McpRunStatus; error?: string },
+  options: { key: string; status: McpRunStatus; error?: string; result?: unknown },
 ): McpRunSummary | null {
   const match = MCP_TOOL_NAME_RE.exec(toolName);
   if (!match) return null;
@@ -1066,6 +1086,7 @@ function mcpRunFromToolName(
     args: argsObject,
     status: options.status,
     error: options.error,
+    result: options.result,
   };
 }
 
@@ -1093,6 +1114,7 @@ function mcpRunFromEvent(event: ToolProgressEvent): McpRunSummary | null {
     key,
     status: cliRunStatusFromPhase(event.phase),
     error: cliRunError(event),
+    result: event.result,
   });
 }
 
@@ -1258,6 +1280,16 @@ function CliRunRow({ run, active, app }: { run: CliRunSummary; active: boolean; 
     { name: displayName },
   );
 
+  const detailEntries = [buildToolCallDetailEntry(
+    run.name,
+    { command: `${run.name} ${formatCliArgs(run)}`.trim() },
+    run.result,
+    run.error,
+  )];
+  const details = hasToolCallDetail(detailEntries)
+    ? <ToolCallDetail entries={detailEntries} />
+    : undefined;
+
   return (
     <ActivityStep
       active={rowActive}
@@ -1265,6 +1297,7 @@ function CliRunRow({ run, active, app }: { run: CliRunSummary; active: boolean; 
       label={label}
       detail={args}
       detailClassName="font-mono text-[12px]"
+      details={details}
       marker={(
         <span
           data-testid={`activity-cli-logo-${run.name.toLowerCase()}`}
@@ -1340,12 +1373,23 @@ function McpRunRow({ run, active, preset }: { run: McpRunSummary; active: boolea
   );
   const label = formatActivityTarget(t, activity.action, activity.target ?? "");
 
+  const detailEntries = [buildToolCallDetailEntry(
+    `${run.presetName}.${run.toolName}`,
+    run.args,
+    run.result,
+    run.error,
+  )];
+  const details = hasToolCallDetail(detailEntries)
+    ? <ToolCallDetail entries={detailEntries} />
+    : undefined;
+
   return (
     <ActivityStep
       active={rowActive}
       tone={failed ? "error" : rowActive ? "active" : run.status === "done" ? "success" : "neutral"}
       label={label}
       detail={displayName}
+      details={details}
       marker={(
         <span
           data-testid={`activity-mcp-logo-${run.presetName.toLowerCase()}`}

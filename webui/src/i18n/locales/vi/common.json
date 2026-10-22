@@ -2216,6 +2216,16 @@
     "activityShow": "Xem quá trình",
     "activityShowFor": "Xem quá trình {{duration}}",
     "activityHide": "Ẩn quá trình",
+    "toolDetail": {
+      "arguments": "Tham số",
+      "command": "Lệnh",
+      "result": "Kết quả",
+      "error": "Lỗi",
+      "copy": "Sao chép",
+      "copied": "Đã sao chép",
+      "showAll": "Hiện tất cả",
+      "showLess": "Thu gọn"
+    },
     "traceDetailsLoadFailed": "Không thể tải đầy đủ chi tiết hoạt động.",
     "retryTraceDetails": "Thử lại",
     "retryConnection": "Kết nối thất bại",

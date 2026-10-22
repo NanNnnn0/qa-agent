@@ -2216,6 +2216,16 @@
     "activityShow": "Voir l’activité",
     "activityShowFor": "Voir l’activité {{duration}}",
     "activityHide": "Masquer l’activité",
+    "toolDetail": {
+      "arguments": "Arguments",
+      "command": "Commande",
+      "result": "Résultat",
+      "error": "Erreur",
+      "copy": "Copier",
+      "copied": "Copié",
+      "showAll": "Tout afficher",
+      "showLess": "Réduire"
+    },
     "traceDetailsLoadFailed": "Impossible de charger les détails complets de l’activité.",
     "retryTraceDetails": "Réessayer",
     "retryConnection": "Échec de la connexion",
