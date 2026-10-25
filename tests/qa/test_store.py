@@ -170,3 +170,97 @@ def test_overview_counts(store: QaStore, project: dict) -> None:
     assert counts["ready_cases"] == 1
     assert counts["scripts"] == 1
     assert counts["active_tasks"] == 1
+
+
+def test_trace_edges_replace_and_reverse_lookup(store: QaStore, project: dict) -> None:
+    store.replace_trace_edges(
+        project["id"],
+        "case",
+        "TC-SHOP-001",
+        [("testpoint", "TP-SHOP-001"), ("source", "REQ-SHOP-01")],
+    )
+    # Replacing the same source node removes the edge that is no longer declared.
+    assert store.replace_trace_edges(
+        project["id"], "case", "TC-SHOP-001", [("testpoint", "TP-SHOP-001")]
+    ) == 1
+    assert store.list_trace_edges(project["id"]) == [
+        {
+            "from_type": "case",
+            "from_id": "TC-SHOP-001",
+            "to_type": "testpoint",
+            "to_id": "TP-SHOP-001",
+        }
+    ]
+    assert store.get_dependents(project["id"], "testpoint", "TP-SHOP-001") == [
+        {"from_type": "case", "from_id": "TC-SHOP-001"}
+    ]
+    assert store.get_dependents(project["id"], "source", "REQ-SHOP-01") == []
+
+
+def test_case_trace_summary_upsert_and_stale(store: QaStore, project: dict) -> None:
+    case = store.create_case(project["id"], title="one", kind="api")
+    summary = store.upsert_case_trace_summary({
+        "case_id": case["id"],
+        "needs_links": False,
+        "needs_recheck": True,
+        "trace_status": "reviewed",
+        "recheck_reasons": ["content_changed"],
+        "testpoint_count": 2,
+        "source_count": 3,
+        "input_hash": "abc",
+        "state": "fresh",
+    })
+    assert summary["needs_links"] is False
+    assert summary["needs_recheck"] is True
+    assert summary["recheck_reasons"] == ["content_changed"]
+    assert summary["testpoint_count"] == 2
+    assert summary["source_count"] == 3
+
+    updated = store.upsert_case_trace_summary({
+        "case_id": case["id"],
+        "needs_links": True,
+        "state": "stale",
+    })
+    assert updated["needs_links"] is True
+    assert updated["needs_recheck"] is False
+    assert updated["state"] == "stale"
+
+    assert store.mark_case_trace_stale([case["id"]]) == 0  # already stale
+    store.upsert_case_trace_summary({"case_id": case["id"], "state": "fresh"})
+    assert store.mark_case_trace_stale([case["id"]]) == 1
+    assert store.get_case_trace_summary(case["id"])["state"] == "stale"
+
+
+def test_replace_trace_index_is_idempotent(store: QaStore, project: dict) -> None:
+    case = store.create_case(project["id"], title="one", kind="api")
+    payload = {
+        "edges": [("case", case["id"], "testpoint", "TP-SHOP-001")],
+        "summaries": [{
+            "case_id": case["id"],
+            "needs_links": False,
+            "testpoint_count": 1,
+            "source_count": 1,
+            "input_hash": "hash",
+            "state": "fresh",
+        }],
+        "files": [{
+            "path": "cases/TC-SHOP-001.yaml",
+            "entity_type": "case",
+            "entity_id": case["id"],
+            "content_hash": "filehash",
+            "mtime_ns": 1,
+        }],
+    }
+    first = store.replace_trace_index(project["id"], **payload)
+    second = store.replace_trace_index(project["id"], **payload)
+    assert first == second == {"edges": 1, "summaries": 1, "files": 1}
+    assert store.trace_index_stats(project["id"]) == {
+        "edges": 1,
+        "summaries": 1,
+        "files": 1,
+        "stale": 0,
+        "needs_recheck": 0,
+    }
+    assert store.get_trace_file_state(project["id"], "cases/TC-SHOP-001.yaml")[
+        "content_hash"
+    ] == "filehash"

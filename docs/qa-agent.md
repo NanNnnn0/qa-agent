@@ -243,9 +243,9 @@ mutation qa.trace.review_reject    → /api/qa/trace/review/reject    退回草�
   默认列表不再出现，ID 退休不复用；`?status=deprecated` 仍可查。
 - **链路徽标**：列表里每条用例显示 来源 / 测试点 / 脚本 / 需复核 / 草稿区，缺链路时显示
   缺来源/缺测试点——迁移出来的旧用例一开始就是这个状态。
-- **索引**：列表/过滤/搜索仍走 SQLite（快），但内容来自 YAML。写完自动重建；手工改 YAML
-  或 `git pull` 之后跑 `nanobot qa reindex`。新检出/刚迁移且一条索引行都没有时，读路径会
-  自愈重建一次。
+- **索引**：列表/过滤/搜索走 SQLite 摘要索引（快），详情按需读取 YAML。单条写入只刷新
+  对应行；手工改 YAML 或 `git pull` 之后跑 `nanobot qa reindex`。新检出/刚迁移且一条索引
+  行都没有时，读路径会自愈重建一次。
 - **旧 SQLite 行**：还没迁移的行仍可查看（`legacy: true`），但更新/删除会 409 并提示先迁移。
 
 迁移命令（只读数据库，可重复执行，重跑按 `legacy_id` 跳过）：
@@ -353,8 +353,9 @@ cd webui; npm run build
   会以「缺来源/缺测试点」的草稿出现，`review list` 里是 invalid——需要人补测试点/来源后
   才能「标记为已评审」进入正式库。页面的「标记为已评审」不会替你造链路。
 - 用例库的列表/搜索读 SQLite 派生索引：手工改 YAML 或 `git pull` 之后要跑
-  `nanobot qa reindex`（新检出且一条索引行都没有时会自愈一次）。每次写都会重建该项目的
-  派生行，规模是「全项目扫描」，万级用例需要增量方案。
+  `nanobot qa reindex`（新检出且一条索引行都没有时会自愈一次）。单条写入只更新对应派生行
+  和追溯摘要，批量导入使用单事务；全量重建仅用于迁移/修复。出现异常时可设置
+  `QA_CASE_TRACE_INCREMENTAL=0` 回退旧的完整列表/全量重建路径。
 - 迁移只导出用例：SQLite 的 `scripts.case_ids` 仍是旧 `case_*` ID（不会自动映射成
   `<file>::<nodeid>` 脚本绑定），历史 `runs/` 里的 ID 也不回改；迁移不建需求/测试点。
 - 用例 ID（`TC-<MODULE>-<seq>`）按「项目内最大号 + 1」分配，并发写同一项目可能撞号，

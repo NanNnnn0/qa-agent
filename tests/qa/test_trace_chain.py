@@ -358,7 +358,13 @@ def test_case_payload_inherits_the_group_and_sources_of_its_testpoint() -> None:
 
     listed = CaseFiles(shared_store()).list_cases(project_id=project_id)["items"][0]
     assert listed["group"] == "登录模块/注册界面"
-    assert [item["id"] for item in listed["trace_sources"]] == [source_id]
+    assert listed["module_id"] == "登录模块"
+    assert listed["testpoint_count"] == 1
+    assert listed["source_count"] == 1
+    assert listed["needs_links"] is False
+    # The list is a summary: the resolved chain stays on the detail payload.
+    assert "trace_sources" not in listed
+    assert "api" not in listed
 
 
 def test_covered_cases_carry_their_human_code() -> None:

@@ -12,6 +12,7 @@ import {
 import {
   loadQaApiOperation,
   loadQaApiOperations,
+  loadQaCase,
   loadQaCases,
   type QaApiOperation,
   type QaCase,
@@ -113,10 +114,17 @@ export function QaApiAssets({
 
   const items = list.data?.items ?? [];
   const selected = detail.data ?? items.find((item) => item.id === selectedId) ?? null;
+  const caseDetail = useQaQuery<QaCase | null>(
+    () => (selectedCaseId ? loadQaCase(token, selectedCaseId) : Promise.resolve(null)),
+    [token, selectedCaseId],
+    { enabled: Boolean(selectedCaseId), intervalMs: 0 },
+  );
   const allCases = caseList.data?.items ?? [];
-  const selectedCase = selectedCaseId
+  const summaryCase = selectedCaseId
     ? (allCases.find((item) => item.id === selectedCaseId) ?? null)
     : null;
+  // The list payload is a summary; the drawer always asks for the full case.
+  const selectedCase = caseDetail.data ?? summaryCase;
 
   const casesByOperation = useMemo(() => {
     const byKey = new Map<string, string>();
@@ -129,11 +137,12 @@ export function QaApiAssets({
       grouped.set(operation.id, []);
     }
     for (const qaCase of allCases) {
-      const request = qaCase.api?.request;
-      if (!request?.method || !request.path) continue;
-      const operationId = byKey.get(
-        operationKey(qaCase.project_id, request.method, request.path),
-      );
+      const method = qaCase.api_method || qaCase.api?.request?.method;
+      const path = qaCase.api_path || qaCase.api?.request?.path;
+      const matched = method && path
+        ? byKey.get(operationKey(qaCase.project_id, method, path))
+        : undefined;
+      const operationId = qaCase.operation_id || matched;
       if (!operationId) continue;
       grouped.get(operationId)?.push(qaCase);
     }

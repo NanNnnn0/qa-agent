@@ -670,6 +670,67 @@ describe("QA workbench", () => {
     expect(screen.getByTestId("qa-script-project-proj-2")).toBeInTheDocument();
   });
 
+  it("paginates cases at fifty per page and requests summaries", async () => {
+    const user = userEvent.setup();
+    const urls: URL[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), "http://127.0.0.1");
+        urls.push(url);
+        if (url.pathname === "/api/qa/cases/facets") {
+          return jsonResponse({
+            ok: true,
+            modules: [{ id: "登录模块", count: 60 }],
+            operations: [],
+          });
+        }
+        if (url.pathname === "/api/qa/cases") {
+          const offset = Number(url.searchParams.get("offset") ?? "0");
+          const items = Array.from({ length: offset === 0 ? 50 : 10 }, (_, index) => ({
+            ...qaCase,
+            id: `case-${offset + index + 1}`,
+            code: `WEB-API-${String(offset + index + 1).padStart(3, "0")}`,
+            title: `用例 ${offset + index + 1}`,
+            group: "登录模块/注册界面",
+            trace_state: "fresh",
+            testpoint_count: 1,
+            source_count: 1,
+          }));
+          return jsonResponse({ ok: true, items, total: 60, limit: 50, offset });
+        }
+        return routeFetch(input);
+      }),
+    );
+    renderWorkbench({ initialTab: "cases" });
+
+    await screen.findByTestId("qa-case-pagination");
+    expect(screen.getByTestId("qa-case-pagination")).toHaveTextContent("第 1 / 2 页");
+    await waitFor(() => {
+      expect(
+        urls.some(
+          (url) =>
+            url.pathname === "/api/qa/cases" &&
+            url.searchParams.get("limit") === "50" &&
+            url.searchParams.get("offset") === "0",
+        ),
+      ).toBe(true);
+    });
+
+    await user.click(screen.getByTestId("qa-case-page-next"));
+    await waitFor(() => {
+      expect(
+        urls.some(
+          (url) =>
+            url.pathname === "/api/qa/cases" &&
+            url.searchParams.get("limit") === "50" &&
+            url.searchParams.get("offset") === "50",
+        ),
+      ).toBe(true);
+    });
+    expect(screen.getByTestId("qa-case-pagination")).toHaveTextContent("第 2 / 2 页");
+  });
+
   it("defaults the workbench scope to the chat's bound QA project", async () => {
     const user = userEvent.setup();
     renderWorkbench({ initialProjectId: "proj-1" });

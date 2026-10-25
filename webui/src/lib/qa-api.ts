@@ -130,6 +130,21 @@ export interface QaCase {
   sources?: string[];
   /** Breadcrumb group resolved from the linked test point (`登录模块/注册界面`). */
   group?: string | null;
+  /** Stable module segment: first group level, or the case ID module. */
+  module_id?: string;
+  /** Linked API operation id, when the case was generated from an API asset. */
+  operation_id?: string;
+  /** Summary-only request method/path; the full `api` object stays on detail. */
+  api_method?: string;
+  api_path?: string;
+  /** Summary-only trace counts; the resolved chain stays on detail. */
+  testpoint_count?: number;
+  source_count?: number;
+  /** Summary freshness: fresh / stale / unknown. */
+  trace_state?: string;
+  /** Summary-only step count and API presence for compact list clients. */
+  step_count?: number;
+  has_api?: boolean;
   /** Linked test points, resolved with their short code and group. */
   trace_testpoints?: QaCaseTraceTestpoint[];
   /** Every source reachable through the test points (the `来源` badge). */
@@ -484,6 +499,17 @@ function normalizeCase(value: unknown): QaCase {
   if (row.testpoints !== undefined) case_.testpoints = textList(row.testpoints);
   if (row.sources !== undefined) case_.sources = textList(row.sources);
   if (row.group !== undefined) case_.group = text(row.group) || null;
+  if (row.module_id !== undefined) case_.module_id = text(row.module_id);
+  if (row.operation_id !== undefined) case_.operation_id = text(row.operation_id);
+  if (row.api_method !== undefined) case_.api_method = text(row.api_method);
+  if (row.api_path !== undefined) case_.api_path = text(row.api_path);
+  if (row.testpoint_count !== undefined) {
+    case_.testpoint_count = integer(row.testpoint_count);
+  }
+  if (row.source_count !== undefined) case_.source_count = integer(row.source_count);
+  if (row.trace_state !== undefined) case_.trace_state = text(row.trace_state);
+  if (row.step_count !== undefined) case_.step_count = integer(row.step_count);
+  if (row.has_api !== undefined) case_.has_api = Boolean(row.has_api);
   if (Array.isArray(row.trace_testpoints)) {
     case_.trace_testpoints = row.trace_testpoints.filter(isRecord).map((item) => ({
       id: text(item.id),
@@ -889,11 +915,31 @@ export async function loadQaProjects(token: string): Promise<QaProject[]> {
 
 export interface QaCaseQuery {
   projectId?: string;
+  moduleId?: string;
+  operationId?: string;
   kind?: string;
   status?: string;
   query?: string;
   limit?: number;
   offset?: number;
+}
+
+export interface QaCaseFacetModule {
+  id: string;
+  count: number;
+}
+
+export interface QaCaseFacetOperation {
+  id: string;
+  method: string;
+  path: string;
+  operation_key: string;
+  count: number;
+}
+
+export interface QaCaseFacets {
+  modules: QaCaseFacetModule[];
+  operations: QaCaseFacetOperation[];
 }
 
 export async function loadQaCases(
@@ -903,6 +949,8 @@ export async function loadQaCases(
   const payload = await request<RawRecord>(
     `/api/qa/cases${qaQuery({
       project_id: query.projectId,
+      module_id: query.moduleId,
+      operation_id: query.operationId,
       kind: query.kind,
       status: query.status,
       q: query.query,
@@ -915,7 +963,7 @@ export async function loadQaCases(
   return {
     items,
     total: integer(payload.total, items.length),
-    limit: integer(payload.limit, query.limit ?? 100),
+    limit: integer(payload.limit, query.limit ?? 50),
     offset: integer(payload.offset, query.offset ?? 0),
   };
 }
@@ -923,6 +971,32 @@ export async function loadQaCases(
 export async function loadQaCase(token: string, id: string): Promise<QaCase> {
   const payload = await request<RawRecord>(`/api/qa/cases/${encodeURIComponent(id)}`, token);
   return normalizeCase(payload.case);
+}
+
+export async function loadQaCaseFacets(
+  token: string,
+  projectId?: string,
+): Promise<QaCaseFacets> {
+  const payload = await request<RawRecord>(
+    `/api/qa/cases/facets${qaQuery({ project_id: projectId })}`,
+    token,
+  );
+  const modules = Array.isArray(payload.modules)
+    ? payload.modules.filter(isRecord).map((item) => ({
+        id: text(item.id),
+        count: integer(item.count),
+      }))
+    : [];
+  const operations = Array.isArray(payload.operations)
+    ? payload.operations.filter(isRecord).map((item) => ({
+        id: text(item.id),
+        method: text(item.method).toUpperCase(),
+        path: text(item.path),
+        operation_key: text(item.operation_key),
+        count: integer(item.count),
+      }))
+    : [];
+  return { modules, operations };
 }
 
 export async function loadQaCaseExport(

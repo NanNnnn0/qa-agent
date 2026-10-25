@@ -17,7 +17,7 @@ WebUI transport defines them.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,7 +27,7 @@ from websockets.http11 import Response
 
 from nanobot.qa import service
 from nanobot.qa import testpoints as qa_testpoints
-from nanobot.qa.case_files import CaseFiles
+from nanobot.qa.case_files import CaseFiles, incremental_enabled
 from nanobot.qa.store import QaStore
 from nanobot.qa.testpoints import require_links_for_ready
 from nanobot.qa.validation import (
@@ -113,20 +113,63 @@ _CASE_WRITE_FIELDS = frozenset({
 
 
 
-def _reindex_after_review(store: QaStore) -> None:
-    """Rebuild the derived case index after a trace review.
+def _refresh_after_review(
+    library: CaseFiles, root: Path, result: Mapping[str, Any]
+) -> None:
+    """Refresh only the reviewed entity after a trace review.
 
     Approving a draft moves its file from ``draft/`` to ``cases/``; the derived
-    rows keep the old path until something reindexes, and the case library would
-    keep showing the case as an unlinked draft. The review already succeeded, so
-    a reindex failure is logged instead of failing the request.
+    row and its trace summary must follow.  A failed incremental refresh falls
+    back to the full project reindex, because the review itself already
+    succeeded.
     """
+    reviews = result.get("reviews")
+    if not isinstance(reviews, list):
+        review = result.get("review")
+        reviews = [review] if isinstance(review, Mapping) else []
+    if not reviews:
+        return
     try:
-        from nanobot.qa.case_files import reindex_cases
-
-        reindex_cases(store)
-    except Exception:  # pragma: no cover - the write already succeeded
-        logger.warning("qa cases: reindex after review failed", exc_info=True)
+        qa_project = next(
+            (
+                project
+                for project in library.store.list_projects()
+                if library.project_dir(project).resolve() == root.resolve()
+            ),
+            None,
+        )
+    except OSError:  # pragma: no cover - the directory vanished mid-request
+        qa_project = None
+    if qa_project is None:
+        logger.warning(
+            "qa cases: no QA project owns trace root {}", root.as_posix()
+        )
+        return
+    if not incremental_enabled():
+        library.reindex(project_id=qa_project["id"])
+        return
+    for review in reviews:
+        if not isinstance(review, Mapping):
+            continue
+        entity_id = review.get("id")
+        kind = review.get("kind")
+        if not isinstance(entity_id, str) or kind not in {
+            "source",
+            "testpoint",
+            "case",
+        }:
+            continue
+        try:
+            library.refresh_trace_entity(qa_project["id"], kind, entity_id)
+        except Exception:  # pragma: no cover - the write already succeeded
+            logger.warning(
+                "qa cases: incremental refresh after review failed", exc_info=True
+            )
+            try:
+                library.reindex(project_id=qa_project["id"])
+            except Exception:
+                logger.warning("qa cases: reindex after review failed", exc_info=True)
+            return
 
 
 def _error(status: int, message: str) -> Response:
@@ -230,13 +273,31 @@ class QaApi:
         if path == f"{QA_PREFIX}/cases/export":
             payload = self._cases().export_cases(_query_first(query, "project_id") or None)
             return _ok(payload)
+        if path == f"{QA_PREFIX}/cases/facets":
+            return _ok(store.list_case_facets(
+                _query_first(query, "project_id") or None
+            ))
         if path == f"{QA_PREFIX}/cases":
             return _ok(self._cases().list_cases(
                 project_id=_query_first(query, "project_id") or None,
+                module_id=(
+                    _query_first(query, "module_id")
+                    or _query_first(query, "module")
+                    or None
+                ),
+                operation_id=(
+                    _query_first(query, "operation_id")
+                    or _query_first(query, "operation")
+                    or None
+                ),
                 kind=_query_first(query, "kind") or None,
                 status=_query_first(query, "status") or None,
-                query=_query_first(query, "q") or None,
-                limit=_int_query(query, "limit", 100),
+                query=(
+                    _query_first(query, "q")
+                    or _query_first(query, "query")
+                    or None
+                ),
+                limit=_int_query(query, "limit", 50),
                 offset=_int_query(query, "offset", 0),
             ))
         if path.startswith(f"{QA_PREFIX}/cases/") and "/revisions" in path:
@@ -358,12 +419,14 @@ class QaApi:
             if path == "/api/qa/trace/stale/write":
                 return _ok(await asyncio.to_thread(trace.stale_write, payload))
             if path == "/api/qa/trace/review/approve":
+                root = trace.resolve_project(str(payload.get("project") or "") or None)
                 result = await asyncio.to_thread(trace.review_approve, payload)
-                _reindex_after_review(store)
+                _refresh_after_review(self._cases(), root, result)
                 return _ok(result)
             if path == "/api/qa/trace/review/reject":
+                root = trace.resolve_project(str(payload.get("project") or "") or None)
                 result = await asyncio.to_thread(trace.review_reject, payload)
-                _reindex_after_review(store)
+                _refresh_after_review(self._cases(), root, result)
                 return _ok(result)
             return _error(404, "QA trace mutation route not found")
         if path == "/api/qa/projects/create":

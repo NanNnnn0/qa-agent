@@ -19,6 +19,7 @@ import {
   importQaCases,
   loadQaCase,
   loadQaCaseExport,
+  loadQaCaseFacets,
   loadQaCaseRevisions,
   loadQaCases,
   markQaCaseReviewed,
@@ -63,6 +64,7 @@ const CASE_STATUSES: QaCaseStatus[] = ["draft", "ready", "deprecated"];
 /** Archiving is a delete, so the write forms only offer draft/reviewed. */
 const CASE_EDIT_STATUSES: QaCaseStatus[] = ["draft", "ready"];
 const CASE_RISKS = ["", "high", "medium", "low"] as const;
+const CASE_PAGE_SIZE = 50;
 
 /** The case library speaks the trace vocabulary: reviewed, archived. */
 function caseStatusLabel(
@@ -140,42 +142,62 @@ function QaCaseChain({ item, onOpen }: { item: QaCase; onOpen?: () => void }) {
     group: null,
     risk: "",
   }));
-  const inherited = sources.length > 0 && (item.sources ?? []).length === 0;
+  // The list ships counts, not the resolved chain; the drawer ships the names.
+  // Falling back to the array length keeps full detail payloads working too.
+  const sourceCount = item.source_count ?? sources.length;
+  const testpointCount = item.testpoint_count ?? testpoints.length;
+  const chainStale = item.trace_state === "stale";
+  const chainUnknown = item.trace_state === "unknown";
+  const inherited = sourceCount > 0 && (item.sources ?? []).length === 0;
   const sourceNames = sources.map((source) => source.title || source.id);
   const testpointNames = testpoints.map((testpoint) =>
     [testpoint.code, testpoint.title || testpoint.id].filter(Boolean).join(" "),
   );
+  const sourceTitle = sourceNames.length
+    ? `${inherited ? tx("qa.cases.chainInheritedPrefix", "经由测试点：") : ""}${sourceNames.join("、")}`
+    : sourceCount
+      ? tx("qa.cases.chainDetailHint", "展开详情查看来源")
+      : chainStale
+        ? tx("qa.cases.chainStale", "链路待刷新")
+        : tx("qa.cases.chainNoSource", "缺少来源");
+  const testpointTitle = testpointNames.length
+    ? testpointNames.join("、")
+    : testpointCount
+      ? tx("qa.cases.chainDetailHint", "展开详情查看链路")
+      : chainStale
+        ? tx("qa.cases.chainStale", "链路待刷新")
+        : tx("qa.cases.chainNoTestpoint", "缺少测试点");
   return (
     <div className="flex flex-wrap items-center gap-1" data-testid="qa-case-chain">
       <QaChainBadge
-        tone={sources.length ? "blue" : "neutral"}
+        tone={sourceCount ? "blue" : chainStale ? "amber" : "neutral"}
         testId="qa-case-chain-source"
         onOpen={onOpen}
         label={
-          sources.length
-            ? `${tx("qa.cases.chainSource", "来源")} ${sources.length}`
-            : tx("qa.cases.chainNoSource", "缺少来源")
+          sourceCount
+            ? `${tx("qa.cases.chainSource", "来源")} ${sourceCount}`
+            : chainUnknown
+              ? tx("qa.cases.chainUnknown", "链路未知")
+              : chainStale
+                ? tx("qa.cases.chainStale", "链路待刷新")
+                : tx("qa.cases.chainNoSource", "缺少来源")
         }
-        title={
-          sources.length
-            ? `${inherited ? tx("qa.cases.chainInheritedPrefix", "经由测试点：") : ""}${sourceNames.join("、")}`
-            : tx("qa.cases.chainNoSource", "缺少来源")
-        }
+        title={sourceTitle}
       />
       <QaChainBadge
-        tone={testpoints.length ? "violet" : "neutral"}
+        tone={testpointCount ? "violet" : chainStale ? "amber" : "neutral"}
         testId="qa-case-chain-testpoint"
         onOpen={onOpen}
         label={
-          testpoints.length
-            ? `${tx("qa.cases.chainTestpoint", "测试点")} ${testpoints.length}`
-            : tx("qa.cases.chainNoTestpoint", "缺少测试点")
+          testpointCount
+            ? `${tx("qa.cases.chainTestpoint", "测试点")} ${testpointCount}`
+            : chainUnknown
+              ? tx("qa.cases.chainUnknown", "链路未知")
+              : chainStale
+                ? tx("qa.cases.chainStale", "链路待刷新")
+                : tx("qa.cases.chainNoTestpoint", "缺少测试点")
         }
-        title={
-          testpoints.length
-            ? testpointNames.join("、")
-            : tx("qa.cases.chainNoTestpoint", "缺少测试点")
-        }
+        title={testpointTitle}
       />
       {item.script ? (
         <QaBadge tone="green" title={item.script.binding}>
@@ -301,6 +323,9 @@ export function QaCaseLibrary({
   }, [initialProjectId]);
   const [kind, setKind] = useState<string>("all");
   const [status, setStatus] = useState<string>("all");
+  const [moduleId, setModuleId] = useState<string>("all");
+  const [operationId, setOperationId] = useState<string>("all");
+  const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
   const debouncedSearch = useQaDebouncedValue(search, 250);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -310,18 +335,57 @@ export function QaCaseLibrary({
   const [exportError, setExportError] = useState("");
   const [exporting, setExporting] = useState(false);
 
+  const facets = useQaQuery(
+    () =>
+      loadQaCaseFacets(
+        token,
+        projectId === "all" ? undefined : projectId,
+      ),
+    [token, projectId, refreshSignal],
+    { intervalMs: 0 },
+  );
+
+  // Changing the project clears the module/operation selections; any filter
+  // change returns to the first page.
+  useEffect(() => {
+    setModuleId("all");
+    setOperationId("all");
+    setPage(0);
+  }, [projectId]);
+  useEffect(() => {
+    setPage(0);
+  }, [kind, status, moduleId, operationId, debouncedSearch]);
+
   const cases = useQaQuery(
     () =>
       loadQaCases(token, {
         projectId: projectId === "all" ? undefined : projectId,
+        moduleId: moduleId === "all" ? undefined : moduleId,
+        operationId: operationId === "all" ? undefined : operationId,
         kind: kind === "all" ? undefined : kind,
         status: status === "all" ? undefined : status,
         query: debouncedSearch.trim() || undefined,
-        limit: 200,
+        limit: CASE_PAGE_SIZE,
+        offset: page * CASE_PAGE_SIZE,
       }),
-    [token, projectId, kind, status, debouncedSearch, refreshSignal],
+    [
+      token,
+      projectId,
+      moduleId,
+      operationId,
+      kind,
+      status,
+      debouncedSearch,
+      page,
+      refreshSignal,
+    ],
     { intervalMs: 0 },
   );
+  const total = cases.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / CASE_PAGE_SIZE));
+  useEffect(() => {
+    if (page >= pageCount) setPage(pageCount - 1);
+  }, [page, pageCount]);
 
   const items = cases.data?.items ?? [];
   const selectedCase = items.find((item) => item.id === selectedId) ?? null;
@@ -424,6 +488,42 @@ export function QaCaseLibrary({
             {projects.map((project) => (
               <SelectItem key={project.id} value={project.id}>
                 {project.key || project.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={moduleId} onValueChange={setModuleId}>
+          <SelectTrigger
+            aria-label={tx("qa.cases.filterModule", "模块筛选")}
+            className="h-8 w-[10rem]"
+            data-testid="qa-case-filter-module"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{tx("qa.filters.allModules", "全部模块")}</SelectItem>
+            {(facets.data?.modules ?? []).map((module) => (
+              <SelectItem key={module.id} value={module.id}>
+                {module.id} ({module.count})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={operationId} onValueChange={setOperationId}>
+          <SelectTrigger
+            aria-label={tx("qa.cases.filterOperation", "接口筛选")}
+            className="h-8 w-[14rem]"
+            data-testid="qa-case-filter-operation"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{tx("qa.filters.allOperations", "全部接口")}</SelectItem>
+            {(facets.data?.operations ?? []).map((operation) => (
+              <SelectItem key={operation.id} value={operation.id}>
+                {[operation.method, operation.path || operation.operation_key]
+                  .filter(Boolean)
+                  .join(" ")}
               </SelectItem>
             ))}
           </SelectContent>
@@ -568,6 +668,43 @@ export function QaCaseLibrary({
         </QaTableShell>
       )}
 
+      {items.length > 0 ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 text-[12px] text-muted-foreground"
+          data-testid="qa-case-pagination"
+        >
+          <span>
+            {tx("qa.cases.page", "第")} {page + 1} / {pageCount}{" "}
+            {tx("qa.cases.pageSuffix", "页")} · {tx("qa.cases.total", "共")} {total}{" "}
+            {tx("qa.cases.rows", "条")}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7"
+              disabled={page === 0}
+              onClick={() => setPage((current) => Math.max(0, current - 1))}
+              data-testid="qa-case-page-prev"
+            >
+              {tx("qa.cases.prevPage", "上一页")}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7"
+              disabled={page + 1 >= pageCount}
+              onClick={() => setPage((current) => current + 1)}
+              data-testid="qa-case-page-next"
+            >
+              {tx("qa.cases.nextPage", "下一页")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <QaCaseDrawer
         token={token}
         client={client}
@@ -707,8 +844,9 @@ function QaCaseDrawer({
     setRisk(current.risk ?? "");
     setError("");
     setSavedAt("");
-    // Reset the form only when a different case is opened.
-  }, [loadedId]);
+    // Reset when a different case is opened or when the full detail payload
+    // replaces the lightweight list summary (same id, richer body).
+  }, [loadedId, detail.data]);
 
   const submit = async (nextStatus?: QaCaseStatus) => {
     if (!current || busy) return;

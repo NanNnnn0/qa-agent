@@ -10,6 +10,8 @@ SQLite rows.
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +201,179 @@ def test_list_filters_and_orders_like_the_sqlite_listing(
     assert page["total"] == 3
 
 
+def test_list_returns_sqlite_summaries_without_loading_the_trace_project(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    created = library.create_case(
+        shop["id"],
+        title="linked",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+
+    calls: list[tuple[Any, ...]] = []
+
+    def fail_load(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args)
+        raise AssertionError("the list path must not load the trace project")
+
+    monkeypatch.setattr("nanobot.qa.case_files.load_project", fail_load)
+    result = library.list_cases(project_id=shop["id"])
+    assert calls == []
+    assert result["total"] == 1
+    item = result["items"][0]
+    assert item["id"] == created["id"]
+    assert item["module_id"] == "SHOP"
+    assert item["group"] is None
+    assert item["operation_id"] == ""
+    assert item["trace_status"] == "draft"
+    assert item["trace_state"] == "fresh"
+    assert item["needs_links"] is False
+    assert item["testpoint_count"] == 1
+    assert item["source_count"] == 1
+    assert item["api_method"] == "GET"
+    assert item["api_path"] == "/api/products"
+    for key in (
+        "api",
+        "steps",
+        "expected",
+        "preconditions",
+        "testpoints",
+        "sources",
+        "trace_testpoints",
+        "trace_sources",
+    ):
+        assert key not in item
+
+
+def test_list_defaults_to_fifty_rows(
+    store: QaStore, project: dict[str, Any]
+) -> None:
+    for index in range(60):
+        store.create_case(project["id"], title=f"case {index}", kind="api")
+    result = CaseFiles(store).list_cases(project_id=project["id"])
+    assert result["limit"] == 50
+    assert result["total"] == 60
+    assert len(result["items"]) == 50
+
+
+def test_list_filters_by_module_and_operation_without_reading_yaml(
+    library: CaseFiles,
+    shop: dict[str, Any],
+    store: QaStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    write_case_document(
+        directory / "sources" / "REQ-SHOP-02.yaml",
+        {
+            "schema_version": 1,
+            "id": "REQ-SHOP-02",
+            "type": "req",
+            "module": "SHOP",
+            "title": "order requirement",
+            "evidence": [{"type": "document", "locator": "docs/order.md"}],
+            "status": "active",
+            "confidence": "confirmed",
+        },
+    )
+    write_case_document(
+        directory / "testpoints" / "TP-SHOP-002.yaml",
+        {
+            "schema_version": 1,
+            "id": "TP-SHOP-002",
+            "title": "order boundary",
+            "sources": ["REQ-SHOP-02"],
+            "group": "订单模块/下单",
+            "method": "boundary",
+            "risk": "high",
+            "status": "reviewed",
+        },
+    )
+    # Give the first test point a group as well.
+    first_testpoint = directory / "testpoints" / "TP-SHOP-001.yaml"
+    first_doc = json.loads(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "TP-SHOP-001",
+                "title": "login boundary",
+                "sources": ["REQ-SHOP-01"],
+                "group": "登录模块/注册界面",
+                "method": "boundary",
+                "risk": "high",
+                "status": "reviewed",
+            }
+        )
+    )
+    write_case_document(first_testpoint, first_doc)
+
+    login_case = library.create_case(
+        shop["id"],
+        title="login case",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    order_case = library.create_case(
+        shop["id"],
+        title="order case",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-002"],
+    )
+    library.create_case(shop["id"], title="unlinked", kind="api", api=API_SPEC)
+
+    store.ingest_api_operations(
+        shop["id"],
+        [{"method": "GET", "path": "/api/products", "summary": "list products"}],
+    )
+    operation = store.list_api_operations(shop["id"])["items"][0]
+    store._conn.execute(
+        "INSERT INTO api_case_metadata (case_id, operation_id, scenario_key,"
+        " evidence, revision, updated_at) VALUES (?, ?, '', '[]', 1, ?)",
+        (login_case["id"], operation["id"], "2026-01-01T00:00:00Z"),
+    )
+    store._conn.commit()
+
+    modules = library.list_cases(project_id=shop["id"], module_id="登录模块")
+    assert [item["id"] for item in modules["items"]] == [login_case["id"]]
+    operations = library.list_cases(
+        project_id=shop["id"], operation_id=operation["id"]
+    )
+    assert [item["id"] for item in operations["items"]] == [login_case["id"]]
+    searched = library.list_cases(
+        project_id=shop["id"], module_id="登录模块", query="login"
+    )
+    assert [item["id"] for item in searched["items"]] == [login_case["id"]]
+    assert order_case["id"] not in {item["id"] for item in searched["items"]}
+
+    page = library.list_cases(project_id=shop["id"], limit=1, offset=1)
+    assert page["limit"] == 1
+    assert page["offset"] == 1
+    assert len(page["items"]) == 1
+
+    facets = store.list_case_facets(shop["id"])
+    assert {"登录模块", "订单模块"} <= {
+        item["id"] for item in facets["modules"]
+    }
+    assert [item["id"] for item in facets["operations"]] == [operation["id"]]
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("filtered listing must not read YAML")
+
+    monkeypatch.setattr("nanobot.qa.case_files.load_project", fail)
+    monkeypatch.setattr("nanobot.qa.case_files.read_case_document", fail)
+    filtered = library.list_cases(
+        project_id=shop["id"], module_id="登录模块", query="login"
+    )
+    assert [item["id"] for item in filtered["items"]] == [login_case["id"]]
+
+
 def test_get_carries_the_legacy_shape_and_the_trace_badges(
     library: CaseFiles, shop: dict[str, Any]
 ) -> None:
@@ -328,6 +503,95 @@ def test_update_edits_the_document_and_keeps_unknown_keys(
     assert "jira: QA-77" in path.read_text(encoding="utf-8")
 
 
+def test_update_does_not_reindex_or_load_the_project(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    created = library.create_case(
+        shop["id"],
+        title="before",
+        kind="api",
+        status="ready",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    before = library.store.get_case_trace_summary(created["id"])
+    assert before is not None
+    created_at = library.store.get_case(created["id"])["created_at"]
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("single update must not rebuild the index")
+
+    monkeypatch.setattr(library, "reindex", fail)
+    monkeypatch.setattr("nanobot.qa.case_files.load_project", fail)
+    updated = library.update_case(created["id"], title="after")
+
+    assert updated["title"] == "after"
+    assert updated["created_at"] == created_at
+    assert updated["updated_at"]
+    assert library.store.get_case(created["id"])["title"] == "after"
+    assert library.store.get_case(created["id"])["created_at"] == created_at
+    after = library.store.get_case_trace_summary(created["id"])
+    assert after is not None
+    assert after["input_hash"] != before["input_hash"]
+
+
+def test_create_uses_a_single_upsert_without_reindex(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("single create must not rebuild the index")
+
+    monkeypatch.setattr(library, "reindex", fail)
+    case = library.create_case(
+        shop["id"], title="created incrementally", kind="api", api=API_SPEC
+    )
+    assert case["id"] == "TC-SHOP-001"
+    assert library.store.get_case(case["id"])["derived"] == 1
+
+
+def test_update_response_matches_the_detail_payload(
+    library: CaseFiles, shop: dict[str, Any]
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    created = library.create_case(
+        shop["id"],
+        title="linked",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    updated = library.update_case(created["id"], title="linked v2")
+    detail = library.get_case(created["id"])
+    for key in (
+        "testpoints",
+        "sources",
+        "trace_testpoints",
+        "trace_sources",
+        "group",
+        "needs_links",
+        "needs_recheck",
+        "recheck_reasons",
+    ):
+        assert updated[key] == detail[key]
+
+
+def test_updating_the_code_replaces_the_old_index_value(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    created = library.create_case(
+        shop["id"], title="rename me", kind="api", code="SHOP-API-001",
+        api=API_SPEC,
+    )
+    updated = library.update_case(created["id"], code="SHOP-API-099")
+    assert updated["code"] == "SHOP-API-099"
+    assert store.get_case(created["id"])["code"] == "SHOP-API-099"
+    assert "SHOP-API-001" not in store.case_codes(shop["id"])
+    assert "SHOP-API-099" in store.case_codes(shop["id"])
+
+
 # -- deleting --------------------------------------------------------------
 
 
@@ -379,6 +643,133 @@ def test_reindex_picks_up_a_hand_edit(
     )
 
 
+def test_reindex_builds_the_trace_index_and_rebuilds_it_after_a_drop(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    case = library.create_case(
+        shop["id"],
+        title="linked",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    stats = {
+        "edges": 2,
+        "summaries": 1,
+        "files": 4,
+        "stale": 0,
+        "needs_recheck": 0,
+    }
+    assert store.trace_index_stats(shop["id"]) == stats
+    assert store.list_trace_edges(shop["id"]) == [
+        {
+            "from_type": "case",
+            "from_id": case["id"],
+            "to_type": "testpoint",
+            "to_id": "TP-SHOP-001",
+        },
+        {
+            "from_type": "testpoint",
+            "from_id": "TP-SHOP-001",
+            "to_type": "source",
+            "to_id": "REQ-SHOP-01",
+        },
+    ]
+
+    summary = store.get_case_trace_summary(case["id"])
+    assert summary is not None
+    assert summary["needs_links"] is False
+    assert summary["needs_recheck"] is False
+    assert summary["testpoint_count"] == 1
+    assert summary["source_count"] == 1
+    assert summary["trace_status"] == "draft"
+    assert summary["state"] == "fresh"
+    assert summary["input_hash"]
+    assert store.get_dependents(shop["id"], "testpoint", "TP-SHOP-001") == [
+        {"from_type": "case", "from_id": case["id"]}
+    ]
+    assert store.get_dependents(shop["id"], "source", "REQ-SHOP-01") == [
+        {"from_type": "testpoint", "from_id": "TP-SHOP-001"}
+    ]
+
+    state = store.get_trace_file_state(shop["id"], case["yaml_path"])
+    assert state is not None
+    assert state["entity_type"] == "case"
+    assert state["entity_id"] == case["id"]
+    assert state["content_hash"]
+    assert state["mtime_ns"] > 0
+
+    # The trace tables are derived: dropping them and reindexing restores the
+    # same rows, and a second rebuild does not duplicate anything.
+    store._conn.executescript(
+        "DROP TABLE case_trace_summary;"
+        " DROP TABLE trace_edges;"
+        " DROP TABLE trace_file_state;"
+    )
+    store._conn.commit()
+    report = library.reindex(project_id=shop["id"])
+    assert report["trace_edges"] == 2
+    assert report["trace_summaries"] == 1
+    assert report["trace_files"] == 4
+    assert store.trace_index_stats(shop["id"]) == stats
+    assert store.get_case_trace_summary(case["id"])["input_hash"] == summary["input_hash"]
+
+    library.reindex(project_id=shop["id"])
+    assert store.trace_index_stats(shop["id"]) == stats
+
+
+def test_trace_summary_marks_a_missing_reference_stale(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    case = library.create_case(
+        shop["id"],
+        title="dangling",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-999"],
+    )
+    summary = store.get_case_trace_summary(case["id"])
+    assert summary is not None
+    assert summary["needs_links"] is False
+    assert summary["testpoint_count"] == 0
+    assert summary["state"] == "stale"
+    listed = library.list_cases(project_id=shop["id"])["items"][0]
+    assert listed["trace_state"] == "stale"
+    assert listed["needs_links"] is False
+    assert listed["testpoint_count"] == 0
+    # The detail path keeps the declared reference; the index does not hide it.
+    assert library.get_case(case["id"])["testpoints"] == ["TP-SHOP-999"]
+
+
+def test_trace_file_state_tracks_a_hand_edit(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    case = library.create_case(
+        shop["id"], title="before", kind="api", api=API_SPEC
+    )
+    before = store.get_trace_file_state(shop["id"], case["yaml_path"])
+    before_summary = store.get_case_trace_summary(case["id"])
+    assert before is not None and before_summary is not None
+
+    path = default_trace_root() / "shop" / case["yaml_path"]
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("title: before", "title: after"),
+        encoding="utf-8",
+    )
+    library.reindex(project_id=shop["id"])
+
+    after = store.get_trace_file_state(shop["id"], case["yaml_path"])
+    after_summary = store.get_case_trace_summary(case["id"])
+    assert after is not None and after_summary is not None
+    assert after["content_hash"] != before["content_hash"]
+    assert after["mtime_ns"] >= before["mtime_ns"]
+    assert after_summary["input_hash"] != before_summary["input_hash"]
+    assert after_summary["state"] == "fresh"
+    assert library.list_cases(project_id=shop["id"])["items"][0]["title"] == "after"
+
+
 def test_export_and_import_round_trip(
     library: CaseFiles, shop: dict[str, Any], store: QaStore
 ) -> None:
@@ -395,6 +786,117 @@ def test_export_and_import_round_trip(
     again = library.import_cases(other["id"], {"cases": exported["cases"]})
     assert again["created"] == []
     assert again["skipped"]
+
+
+def test_import_1000_cases_is_batched_and_idempotent(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    items = [
+        {
+            "title": f"imported case {index}",
+            "kind": "api",
+            "code": f"SHOP-API-{index + 1:03d}",
+            "api": API_SPEC,
+        }
+        for index in range(1000)
+    ]
+    started = time.perf_counter()
+    result = library.import_cases(shop["id"], {"cases": items})
+    elapsed = time.perf_counter() - started
+
+    assert len(result["created"]) == 1000
+    assert elapsed < 30
+    assert store.list_cases(project_id=shop["id"])["total"] == 1000
+    stats = store.trace_index_stats(shop["id"])
+    assert stats["summaries"] == 1000
+    assert stats["edges"] == 0
+    assert stats["files"] == 1001  # project.yaml + 1000 case files
+    assert result["created"][0]["code"] == "SHOP-API-001"
+    assert result["created"][0]["api"]["request"]["path"] == "/api/products"
+    listing = library.list_cases(project_id=shop["id"], limit=50)
+    assert len(listing["items"]) == 50
+    assert len(json.dumps(listing["items"], ensure_ascii=False).encode()) < 120 * 1024
+
+    again = library.import_cases(shop["id"], {"cases": items})
+    assert again["created"] == []
+    assert len(again["skipped"]) == 1000
+    assert store.list_cases(project_id=shop["id"])["total"] == 1000
+    assert store.trace_index_stats(shop["id"]) == stats
+
+
+def test_import_rolls_back_yaml_and_sqlite_on_transaction_failure(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    store._conn.execute(
+        "CREATE TRIGGER fail_import_summary BEFORE INSERT ON case_trace_summary"
+        " BEGIN SELECT RAISE(ABORT, 'boom'); END"
+    )
+    store._conn.commit()
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            library.import_cases(
+                shop["id"],
+                {
+                    "cases": [
+                        {"title": "one", "kind": "api", "api": API_SPEC},
+                        {"title": "two", "kind": "api", "api": API_SPEC},
+                    ]
+                },
+            )
+    finally:
+        store._conn.execute("DROP TRIGGER fail_import_summary")
+        store._conn.commit()
+
+    assert store.list_cases(project_id=shop["id"])["total"] == 0
+    assert store.trace_index_stats(shop["id"])["summaries"] == 0
+    directory = default_trace_root() / "shop"
+    assert list((directory / "draft").rglob("*.yaml")) == []
+
+
+def test_import_preserves_links_and_does_not_duplicate_relations(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    payload = {
+        "cases": [
+            {
+                "title": "linked import",
+                "kind": "api",
+                "status": "draft",
+                "code": "SHOP-API-001",
+                "api": API_SPEC,
+                "testpoints": ["TP-SHOP-001"],
+            }
+        ]
+    }
+    result = library.import_cases(shop["id"], payload)
+    assert len(result["created"]) == 1
+    case = result["created"][0]
+    assert case["testpoints"] == ["TP-SHOP-001"]
+    assert case["needs_links"] is False
+    assert [item["id"] for item in case["trace_sources"]] == ["REQ-SHOP-01"]
+
+    summary = store.get_case_trace_summary(case["id"])
+    assert summary is not None
+    assert summary["testpoint_count"] == 1
+    assert summary["source_count"] == 1
+    assert summary["needs_links"] is False
+    assert summary["state"] == "fresh"
+    edges = store.list_trace_edges(shop["id"])
+    assert {
+        (item["from_type"], item["from_id"], item["to_type"], item["to_id"])
+        for item in edges
+    } == {
+        ("case", case["id"], "testpoint", "TP-SHOP-001"),
+        ("testpoint", "TP-SHOP-001", "source", "REQ-SHOP-01"),
+    }
+
+    again = library.import_cases(shop["id"], payload)
+    assert again["created"] == []
+    assert len(again["skipped"]) == 1
+    assert store.list_trace_edges(shop["id"]) == edges
+    assert store.trace_index_stats(shop["id"])["summaries"] == 1
 
 
 # -- the transitional legacy rows -----------------------------------------
@@ -537,6 +1039,64 @@ async def test_http_cases_are_backed_by_yaml(store: QaStore, shop: dict[str, Any
     assert (default_trace_root() / "shop" / "tombstones" / f"{case_id}.yaml").is_file()
     response = await _dispatch(api, make_request(f"/api/qa/cases?project_id={shop['id']}"))
     assert _body(response)["total"] == 0
+
+
+async def test_http_cases_default_to_fifty_summaries(
+    store: QaStore, shop: dict[str, Any]
+) -> None:
+    from nanobot.qa.http import QaApi
+
+    for index in range(60):
+        store.create_case(shop["id"], title=f"case {index}", kind="api")
+    api = QaApi(store, trace_root=default_trace_root())
+    response = await _dispatch(
+        api, make_request(f"/api/qa/cases?project_id={shop['id']}")
+    )
+    payload = _body(response)
+    assert payload["limit"] == 50
+    assert payload["total"] == 60
+    assert len(payload["items"]) == 50
+    assert "api" not in payload["items"][0]
+    assert "steps" not in payload["items"][0]
+    assert "expected" not in payload["items"][0]
+
+
+async def test_http_case_filters_facets_and_old_params(
+    store: QaStore, shop: dict[str, Any]
+) -> None:
+    from nanobot.qa.http import QaApi
+
+    library = CaseFiles(store, default_trace_root())
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    case = library.create_case(
+        shop["id"],
+        title="filterable case",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    api = QaApi(store, trace_root=default_trace_root())
+    response = await _dispatch(
+        api,
+        make_request(
+            f"/api/qa/cases?project_id={shop['id']}&module_id=SHOP"
+            "&q=filterable&limit=1&offset=0"
+        ),
+    )
+    payload = _body(response)
+    assert payload["total"] == 1
+    assert payload["limit"] == 1
+    assert payload["offset"] == 0
+    assert payload["items"][0]["id"] == case["id"]
+
+    response = await _dispatch(
+        api,
+        make_request(f"/api/qa/cases/facets?project_id={shop['id']}"),
+    )
+    facets = _body(response)
+    assert "SHOP" in {item["id"] for item in facets["modules"]}
+    assert facets["operations"] == []
 
 
 # -- vocabulary drift ------------------------------------------------------

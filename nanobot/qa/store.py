@@ -57,10 +57,88 @@ from nanobot.qa.workspace import ensure_project_directory
 
 # v3 covers additive changes made in parallel: the YAML case-index columns
 # (derived/legacy_id/yaml_path), the schedules table, and the API asset tables
-# (api_operations, api_case_metadata, api_case_revisions, api_workflows). The
-# SCHEMA script runs on every open, so a database already at v3 still gains the
+# (api_operations, api_case_metadata, api_case_revisions, api_workflows).
+# v4 backfills project workspaces.
+# v5 adds the derived trace index (trace_edges, case_trace_summary,
+# trace_file_state) and the case-list indexes.  Every v5 table is rebuildable
+# from the YAML library, so dropping one loses no source data.  The SCHEMA
+# script runs on every open, so a database already at v3/v4 still gains the
 # missing structures; the migration below only upgrades older databases.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+#: Version-5 DDL.  It is appended to ``SCHEMA`` (which runs on every open) and
+#: run again by the v5 migration, so an interrupted upgrade or a manually
+#: dropped derived table is repaired on the next open.  Every statement is
+#: ``IF NOT EXISTS``: repeated startup is idempotent and writes no data.
+V5_SCHEMA = """
+-- Derived trace index: one row per declared parent reference.  Edges point
+-- child -> parent (case -> testpoint, case/testpoint -> source), so the reverse
+-- index answers "what depends on this entity".
+CREATE TABLE IF NOT EXISTS trace_edges (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    from_type TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    to_type TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, from_type, from_id, to_type, to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_edges_target
+    ON trace_edges(project_id, to_type, to_id);
+
+-- Cached list badges for one case.  ``state`` is fresh/stale/unknown: stale
+-- means the inputs moved (or a declared reference is missing) and the row must
+-- be recomputed before it is trusted.  ``trace_status`` is the review status
+-- (draft/reviewed/deprecated), matching the legacy ``status`` vocabulary after
+-- the compat mapping.
+CREATE TABLE IF NOT EXISTS case_trace_summary (
+    case_id TEXT PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    needs_links INTEGER NOT NULL DEFAULT 1,
+    needs_recheck INTEGER NOT NULL DEFAULT 0,
+    trace_status TEXT NOT NULL DEFAULT 'draft',
+    recheck_reasons TEXT NOT NULL DEFAULT '[]',
+    testpoint_count INTEGER NOT NULL DEFAULT 0,
+    source_count INTEGER NOT NULL DEFAULT 0,
+    module_id TEXT NOT NULL DEFAULT '',
+    group_name TEXT NOT NULL DEFAULT '',
+    api_method TEXT NOT NULL DEFAULT '',
+    api_path TEXT NOT NULL DEFAULT '',
+    input_hash TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'unknown'
+);
+CREATE INDEX IF NOT EXISTS idx_case_trace_summary_project
+    ON case_trace_summary(project_id, state);
+CREATE INDEX IF NOT EXISTS idx_case_trace_summary_recheck
+    ON case_trace_summary(project_id, needs_recheck);
+
+-- Hash/mtime of every YAML source file (project, source, testpoint and case).
+-- The incremental path compares this with the file on disk before trusting a
+-- cached summary; a missing row means "unknown", never "empty".
+CREATE TABLE IF NOT EXISTS trace_file_state (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT '',
+    entity_id TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    mtime_ns INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_file_state_entity
+    ON trace_file_state(project_id, entity_type, entity_id);
+
+-- Case-list indexes from the storage plan.  The legacy-visibility predicate
+-- still needs its own rewrite; these make the common project/status/kind sorts
+-- stop building a temporary B-tree.
+CREATE INDEX IF NOT EXISTS idx_cases_project_status_code
+    ON cases(project_id, status, code);
+CREATE INDEX IF NOT EXISTS idx_cases_project_kind_status_code
+    ON cases(project_id, kind, status, code);
+CREATE INDEX IF NOT EXISTS idx_cases_project_code
+    ON cases(project_id, code);
+CREATE INDEX IF NOT EXISTS idx_cases_project_kind_code
+    ON cases(project_id, kind, code);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -224,6 +302,8 @@ CREATE TABLE IF NOT EXISTS api_case_metadata (
     updated_at TEXT NOT NULL,
     UNIQUE (operation_id, scenario_key)
 );
+CREATE INDEX IF NOT EXISTS idx_api_case_metadata_operation
+    ON api_case_metadata(operation_id);
 
 CREATE TABLE IF NOT EXISTS api_case_revisions (
     id TEXT PRIMARY KEY,
@@ -253,7 +333,7 @@ CREATE TABLE IF NOT EXISTS api_workflows (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_workflows_idempotency
     ON api_workflows(idempotency_key) WHERE idempotency_key != '';
-"""
+""" + V5_SCHEMA
 
 _JSON_CASE_FIELDS = ("steps", "api", "tags")
 _JSON_PROJECT_FIELDS = ("default_env",)
@@ -326,6 +406,63 @@ _UPDATE_CASE_SQL = (
     "UPDATE cases SET " + ", ".join(f"{field} = ?" for field in _CASE_BODY_FIELDS)
     + " WHERE id = ?"
 )
+#: One derived case row: insert, or update every mutable column of an existing
+#: row while preserving its original ``created_at``.
+_UPSERT_DERIVED_CASE_SQL = (
+    "INSERT INTO cases (id, project_id, code, title, kind, priority, status,"
+    " preconditions, steps, api, expected, tags, source, author, legacy_id,"
+    " yaml_path, derived, created_at, updated_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
+    " ON CONFLICT(id) DO UPDATE SET"
+    " project_id = excluded.project_id,"
+    " code = excluded.code,"
+    " title = excluded.title,"
+    " kind = excluded.kind,"
+    " priority = excluded.priority,"
+    " status = excluded.status,"
+    " preconditions = excluded.preconditions,"
+    " steps = excluded.steps,"
+    " api = excluded.api,"
+    " expected = excluded.expected,"
+    " tags = excluded.tags,"
+    " source = excluded.source,"
+    " author = excluded.author,"
+    " legacy_id = excluded.legacy_id,"
+    " yaml_path = excluded.yaml_path,"
+    " derived = 1,"
+    " updated_at = excluded.updated_at"
+)
+_UPSERT_CASE_SUMMARY_SQL = (
+    "INSERT INTO case_trace_summary (case_id, project_id, needs_links,"
+    " needs_recheck, trace_status, recheck_reasons, testpoint_count,"
+    " source_count, module_id, group_name, api_method, api_path,"
+    " input_hash, checked_at, state)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " ON CONFLICT(case_id) DO UPDATE SET"
+    " project_id = excluded.project_id,"
+    " needs_links = excluded.needs_links,"
+    " needs_recheck = excluded.needs_recheck,"
+    " trace_status = excluded.trace_status,"
+    " recheck_reasons = excluded.recheck_reasons,"
+    " testpoint_count = excluded.testpoint_count,"
+    " source_count = excluded.source_count,"
+    " module_id = excluded.module_id,"
+    " group_name = excluded.group_name,"
+    " api_method = excluded.api_method,"
+    " api_path = excluded.api_path,"
+    " input_hash = excluded.input_hash,"
+    " checked_at = excluded.checked_at,"
+    " state = excluded.state"
+)
+_UPSERT_TRACE_FILE_SQL = (
+    "INSERT INTO trace_file_state (project_id, path, entity_type, entity_id,"
+    " content_hash, mtime_ns) VALUES (?, ?, ?, ?, ?, ?)"
+    " ON CONFLICT(project_id, path) DO UPDATE SET"
+    " entity_type = excluded.entity_type,"
+    " entity_id = excluded.entity_id,"
+    " content_hash = excluded.content_hash,"
+    " mtime_ns = excluded.mtime_ns"
+)
 _SCHEDULE_UPDATE_FIELDS = {"name", "cron", "timezone", "enabled", "target"}
 
 
@@ -363,6 +500,74 @@ def _derived_case_values(row: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+#: Entity types an edge may connect.  A trace edge is child -> parent, so a
+#: reverse lookup on ``to_type/to_id`` answers "what depends on this entity".
+_TRACE_ENTITY_TYPES = ("case", "testpoint", "source")
+_TRACE_FILE_ENTITY_TYPES = ("project", "source", "testpoint", "case")
+_TRACE_REVIEW_STATUSES = ("draft", "reviewed", "deprecated")
+_TRACE_SUMMARY_STATES = ("fresh", "stale", "unknown")
+
+#: Step-2 list fields added to ``case_trace_summary`` after the first v5 cut.
+#: They are repaired on open, so an existing v5 database gains them without a
+#: schema-version bump.
+_TRACE_SUMMARY_ADDITIONS = (
+    ("module_id", "TEXT NOT NULL DEFAULT ''"),
+    ("group_name", "TEXT NOT NULL DEFAULT ''"),
+    ("api_method", "TEXT NOT NULL DEFAULT ''"),
+    ("api_path", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
+def _trace_edge_pair(edge: Any) -> tuple[str, str]:
+    """Validate one ``(to_type, to_id)`` edge target."""
+    if isinstance(edge, Mapping):
+        to_type = edge.get("to_type")
+        to_id = edge.get("to_id")
+    else:
+        try:
+            to_type, to_id = edge
+        except (TypeError, ValueError):
+            raise QaValidationError(
+                "trace edge must be (to_type, to_id) or an object with those keys"
+            ) from None
+    if not isinstance(to_type, str) or to_type not in _TRACE_ENTITY_TYPES:
+        raise QaValidationError(
+            "trace edge to_type must be one of " + ", ".join(_TRACE_ENTITY_TYPES)
+        )
+    return to_type, require_text(to_id, "to_id", max_length=200)
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    """Return a de-duplicated list of non-empty strings from a JSON field."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, Mapping)):
+        items = [str(item) for item in value]
+    else:
+        raise QaValidationError(f"{field} must be an array of strings")
+    return list(dict.fromkeys(item for item in (raw.strip() for raw in items) if item))
+
+
+def _summary_count(value: Any, field: str) -> int:
+    """Validate a non-negative integer counter in a trace summary."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise QaValidationError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _summary_flag(value: Any, field: str, *, default: bool) -> int:
+    """Validate a boolean summary flag and return the SQLite integer form."""
+    if value is None:
+        return 1 if default else 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    raise QaValidationError(f"{field} must be a boolean")
+
+
 class QaStore:
     """Thread-safe SQLite store for the QA platform."""
 
@@ -381,6 +586,7 @@ class QaStore:
     def _migrate(self) -> None:
         """Apply additive migrations to databases created by older versions."""
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        self._ensure_trace_summary_columns()
         if version >= SCHEMA_VERSION:
             return
         if version < 2:
@@ -422,6 +628,12 @@ class QaStore:
                     "UPDATE projects SET repo_path = ? WHERE id = ?",
                     (ensure_project_directory(str(row["key"] or "")), row["id"]),
                 )
+        if version < 5:
+            # The trace index is derived from YAML.  Creating the tables and
+            # indexes here as well as in SCHEMA repairs an interrupted upgrade
+            # (or a dropped derived table); no rows are written until the next
+            # reindex, so the upgrade itself is idempotent.
+            self._conn.executescript(V5_SCHEMA)
         # The API asset tables come from SCHEMA on every open, so they need no
         # migration branch; this marker only records the shared version.
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -915,28 +1127,35 @@ class QaStore:
         self.get_case(case_id)
         self._write("DELETE FROM cases WHERE id = ?", (case_id,))
 
-    def list_cases(
+    def _case_list_filters(
         self,
         *,
-        project_id: str | None = None,
-        kind: str | None = None,
-        status: str | None = None,
-        query: str | None = None,
-        exclude_deprecated: bool = False,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> dict[str, Any]:
-        """List the case index.
-
-        The result only contains rows a reader should see (see ``_CASE_VISIBLE``);
-        ``exclude_deprecated`` drops archived (tombstoned) cases, which is what a
-        default library listing means now that delete is a tombstone.
-        """
+        project_id: str | None,
+        module_id: str | None,
+        operation_id: str | None,
+        kind: str | None,
+        status: str | None,
+        query: str | None,
+        exclude_deprecated: bool,
+    ) -> tuple[str, list[Any]]:
+        """Build the shared WHERE clause of the full and summary case lists."""
         clauses: list[str] = []
         params: list[Any] = []
         if project_id:
             clauses.append("c.project_id = ?")
             params.append(project_id)
+        if module_id:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM case_trace_summary s"
+                " WHERE s.case_id = c.id AND s.module_id = ?)"
+            )
+            params.append(require_text(module_id, "module_id", max_length=200))
+        if operation_id:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM api_case_metadata m"
+                " WHERE m.case_id = c.id AND m.operation_id = ?)"
+            )
+            params.append(require_text(operation_id, "operation_id", max_length=200))
         if kind:
             clauses.append("c.kind = ?")
             params.append(require_enum(kind, "kind", CASE_KINDS))
@@ -952,7 +1171,36 @@ class QaStore:
             pattern = f"%{query}%"
             params.extend([pattern, pattern, pattern, pattern])
         clauses.append(f"({_CASE_VISIBLE})")
-        where = f" WHERE {' AND '.join(clauses)}"
+        return f" WHERE {' AND '.join(clauses)}", params
+
+    def list_cases(
+        self,
+        *,
+        project_id: str | None = None,
+        module_id: str | None = None,
+        operation_id: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        query: str | None = None,
+        exclude_deprecated: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List the case index.
+
+        The result only contains rows a reader should see (see ``_CASE_VISIBLE``);
+        ``exclude_deprecated`` drops archived (tombstoned) cases, which is what a
+        default library listing means now that delete is a tombstone.
+        """
+        where, params = self._case_list_filters(
+            project_id=project_id,
+            module_id=module_id,
+            operation_id=operation_id,
+            kind=kind,
+            status=status,
+            query=query,
+            exclude_deprecated=exclude_deprecated,
+        )
         total_row = self._fetchone(
             f"SELECT COUNT(*) AS total FROM cases c{where}", tuple(params)
         )
@@ -965,6 +1213,147 @@ class QaStore:
             "total": int(total_row["total"]) if total_row is not None else 0,
             "limit": limit,
             "offset": offset,
+        }
+
+    def list_case_summaries(
+        self,
+        *,
+        project_id: str | None = None,
+        module_id: str | None = None,
+        operation_id: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        query: str | None = None,
+        exclude_deprecated: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List the lightweight case summaries the WebUI table needs.
+
+        No YAML is read here: the row comes from ``cases`` plus the cached
+        ``case_trace_summary``; ``operation_id`` is joined from the API asset
+        metadata so the list can group by interface without loading ``api``.
+        """
+        where, params = self._case_list_filters(
+            project_id=project_id,
+            module_id=module_id,
+            operation_id=operation_id,
+            kind=kind,
+            status=status,
+            query=query,
+            exclude_deprecated=exclude_deprecated,
+        )
+        total_row = self._fetchone(
+            f"SELECT COUNT(*) AS total FROM cases c{where}", tuple(params)
+        )
+        rows = self._fetchall(
+            "SELECT c.id, c.project_id, c.code, c.title, c.kind, c.priority,"
+            " c.status, c.tags, c.source, c.author, c.legacy_id, c.yaml_path,"
+            " c.derived, c.created_at, c.updated_at,"
+            " CASE WHEN json_valid(c.steps) THEN json_array_length(c.steps)"
+            " ELSE 0 END AS step_count,"
+            " CASE WHEN json_valid(c.api) AND c.api != '{}' THEN 1 ELSE 0 END"
+            " AS has_api,"
+            " COALESCE(s.needs_links, 1) AS needs_links,"
+            " COALESCE(s.needs_recheck, 0) AS needs_recheck,"
+            " CASE WHEN s.trace_status IS NOT NULL AND s.trace_status != ''"
+            " THEN s.trace_status"
+            " WHEN c.status = 'ready' THEN 'reviewed'"
+            " WHEN c.status = 'deprecated' THEN 'deprecated'"
+            " ELSE 'draft' END AS trace_status,"
+            " COALESCE(s.recheck_reasons, '[]') AS recheck_reasons,"
+            " COALESCE(s.testpoint_count, 0) AS testpoint_count,"
+            " COALESCE(s.source_count, 0) AS source_count,"
+            " COALESCE(s.module_id, '') AS module_id,"
+            " COALESCE(s.group_name, '') AS group_name,"
+            " COALESCE(NULLIF(s.api_method, ''), o.method,"
+            " CASE WHEN json_valid(c.api) THEN"
+            " json_extract(c.api, '$.request.method') ELSE '' END, '') AS api_method,"
+            " COALESCE(NULLIF(s.api_path, ''), o.path,"
+            " CASE WHEN json_valid(c.api) THEN"
+            " json_extract(c.api, '$.request.path') ELSE '' END, '') AS api_path,"
+            " COALESCE(s.input_hash, '') AS input_hash,"
+            " COALESCE(s.checked_at, '') AS checked_at,"
+            " COALESCE(s.state, 'unknown') AS state,"
+            " COALESCE(m.operation_id, '') AS operation_id"
+            " FROM cases c"
+            " LEFT JOIN case_trace_summary s ON s.case_id = c.id"
+            " LEFT JOIN api_case_metadata m ON m.case_id = c.id"
+            " LEFT JOIN api_operations o ON o.id = m.operation_id"
+            f"{where} ORDER BY c.code LIMIT ? OFFSET ?",
+            (*params, max(1, min(limit, 500)), max(0, offset)),
+        )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["tags"] = loads(data.get("tags"), []) or []
+            data["recheck_reasons"] = loads(data.get("recheck_reasons"), []) or []
+            data["needs_links"] = bool(data.get("needs_links"))
+            data["needs_recheck"] = bool(data.get("needs_recheck"))
+            data["testpoint_count"] = int(data.get("testpoint_count") or 0)
+            data["source_count"] = int(data.get("source_count") or 0)
+            data["legacy"] = int(data.pop("derived", 0) or 0) != 1
+            data["module_id"] = str(data.get("module_id") or "")
+            data["group_name"] = str(data.get("group_name") or "")
+            data["api_method"] = str(data.get("api_method") or "").upper()
+            data["api_path"] = str(data.get("api_path") or "")
+            data["operation_id"] = str(data.get("operation_id") or "")
+            data["state"] = str(data.get("state") or "unknown")
+            items.append(data)
+        return {
+            "items": items,
+            "total": int(total_row["total"]) if total_row is not None else 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def list_case_facets(
+        self, project_id: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return the module and operation values the case list can filter by."""
+        if project_id:
+            self._require_project(project_id)
+        project_clause = " AND c.project_id = ?" if project_id else ""
+        params: tuple[Any, ...] = (project_id,) if project_id else ()
+        module_rows = self._fetchall(
+            "SELECT s.module_id AS id, COUNT(*) AS count"
+            " FROM case_trace_summary s"
+            " JOIN cases c ON c.id = s.case_id"
+            " WHERE s.module_id != '' AND c.status != 'deprecated'"
+            + project_clause
+            + " GROUP BY s.module_id ORDER BY s.module_id",
+            params,
+        )
+        operation_rows = self._fetchall(
+            "SELECT m.operation_id AS id, COALESCE(o.method, '') AS method,"
+            " COALESCE(o.path, '') AS path,"
+            " COALESCE(o.operation_id, '') AS operation_key,"
+            " COUNT(*) AS count"
+            " FROM api_case_metadata m"
+            " JOIN cases c ON c.id = m.case_id"
+            " LEFT JOIN api_operations o ON o.id = m.operation_id"
+            " WHERE m.operation_id IS NOT NULL AND m.operation_id != ''"
+            " AND c.status != 'deprecated'"
+            + project_clause
+            + " GROUP BY m.operation_id, o.method, o.path, o.operation_id"
+            " ORDER BY method, path, id",
+            params,
+        )
+        return {
+            "modules": [
+                {"id": str(row["id"]), "count": int(row["count"])}
+                for row in module_rows
+            ],
+            "operations": [
+                {
+                    "id": str(row["id"]),
+                    "method": str(row["method"]),
+                    "path": str(row["path"]),
+                    "operation_key": str(row["operation_key"]),
+                    "count": int(row["count"]),
+                }
+                for row in operation_rows
+            ],
         }
 
     def replace_derived_cases(
@@ -994,6 +1383,584 @@ class QaStore:
                 [(*values, moment, moment) for *values, moment in prepared],
             )
         return len(prepared)
+
+    def _prepared_derived_cases(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> list[tuple[Any, ...]]:
+        """Return the positional tuples for one derived-case upsert batch."""
+        stamp = utcnow_iso()
+        return [
+            (
+                *_derived_case_values(row),
+                row.get("stamp") or stamp,
+                row.get("stamp") or stamp,
+            )
+            for row in rows
+        ]
+
+    def upsert_derived_cases(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> int:
+        """Insert or update derived case rows in one transaction.
+
+        Updating keeps the row's original ``created_at``; only the mutable
+        columns and ``updated_at`` move.  Repeating the call is idempotent.
+        """
+        prepared = self._prepared_derived_cases(rows)
+        if not prepared:
+            return 0
+        with self._transaction():
+            self._conn.executemany(_UPSERT_DERIVED_CASE_SQL, prepared)
+        return len(prepared)
+
+    def upsert_derived_case(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Insert or update one derived case row and return it."""
+        self.upsert_derived_cases([row])
+        return self.get_case(str(row["id"]))
+
+    def delete_derived_cases(self, case_ids: Iterable[str]) -> int:
+        """Delete YAML-owned case rows (never legacy rows) in one transaction."""
+        ids = list(
+            dict.fromkeys(
+                require_text(case_id, "case_id", max_length=200)
+                for case_id in case_ids
+            )
+        )
+        if not ids:
+            return 0
+        deleted = 0
+        with self._transaction():
+            for case_id in ids:
+                cursor = self._conn.execute(
+                    "DELETE FROM cases WHERE id = ? AND derived = 1", (case_id,)
+                )
+                deleted += cursor.rowcount
+        return deleted
+
+    def delete_derived_case(self, case_id: str) -> int:
+        """Delete one YAML-owned case row (never a legacy row)."""
+        return self.delete_derived_cases([case_id])
+
+    def apply_case_batch(
+        self,
+        project_id: str,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        summaries: Iterable[Mapping[str, Any]] = (),
+        files: Iterable[Mapping[str, Any]] = (),
+        edges: Iterable[Any] = (),
+    ) -> dict[str, int]:
+        """Apply a case batch and its trace rows in one SQLite transaction.
+
+        Used by bulk import: case rows, summaries, file states and the imported
+        cases' edges either all commit or all roll back.
+        """
+        self._require_project(project_id)
+        self.ensure_trace_index_schema()
+        row_list = list(rows)
+        prepared = self._prepared_derived_cases(row_list)
+        case_ids = [str(row["id"]) for row in row_list]
+        summary_rows = [
+            self._summary_row(
+                summary,
+                case_id=require_text(summary.get("case_id"), "case_id", max_length=200),
+                project_id=project_id,
+            )
+            for summary in summaries
+        ]
+        file_rows: list[tuple[Any, ...]] = []
+        seen_paths: set[str] = set()
+        for state in files:
+            row = self._trace_file_row(project_id, state)
+            path = str(row[1])
+            if path in seen_paths:
+                raise QaValidationError(f"duplicate trace file state for '{path}'")
+            seen_paths.add(path)
+            file_rows.append(row)
+        edge_rows: list[tuple[Any, ...]] = []
+        for edge in edges:
+            if isinstance(edge, Mapping):
+                from_type = edge.get("from_type")
+                from_id = edge.get("from_id")
+                to_type = edge.get("to_type")
+                to_id = edge.get("to_id")
+            else:
+                try:
+                    from_type, from_id, to_type, to_id = edge
+                except (TypeError, ValueError):
+                    raise QaValidationError(
+                        "trace edge must be (from_type, from_id, to_type, to_id)"
+                    ) from None
+            from_type = require_enum(from_type, "from_type", _TRACE_ENTITY_TYPES)
+            from_id = require_text(from_id, "from_id", max_length=200)
+            to_type, to_id = _trace_edge_pair((to_type, to_id))
+            edge_rows.append((project_id, from_type, from_id, to_type, to_id))
+        edge_rows = sorted(set(edge_rows))
+        edge_nodes = {("case", case_id) for case_id in case_ids}
+        edge_nodes.update((row[1], row[2]) for row in edge_rows)
+
+        with self._transaction():
+            self._conn.executemany(_UPSERT_DERIVED_CASE_SQL, prepared)
+            for from_type, from_id in sorted(edge_nodes):
+                self._conn.execute(
+                    "DELETE FROM trace_edges WHERE project_id = ?"
+                    " AND from_type = ? AND from_id = ?",
+                    (project_id, from_type, from_id),
+                )
+            self._conn.executemany(
+                "INSERT INTO trace_edges (project_id, from_type, from_id, to_type, to_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                edge_rows,
+            )
+            self._conn.executemany(_UPSERT_CASE_SUMMARY_SQL, summary_rows)
+            self._conn.executemany(_UPSERT_TRACE_FILE_SQL, file_rows)
+        return {
+            "cases": len(prepared),
+            "summaries": len(summary_rows),
+            "files": len(file_rows),
+            "edges": len(edge_rows),
+        }
+
+    # -- derived trace index ----------------------------------------------
+
+    def ensure_trace_index_schema(self) -> None:
+        """Create the v5 derived trace tables if they are missing (idempotent).
+
+        ``SCHEMA`` already does this on every open; the method exists so a
+        rebuild can repair tables dropped while the process is running.
+        """
+        with self._lock, self._conn:
+            self._conn.executescript(V5_SCHEMA)
+            self._ensure_trace_summary_columns()
+
+    def _ensure_trace_summary_columns(self) -> None:
+        """Add the step-2 list columns to a summary table created by v5.0.
+
+        SQLite cannot express ``ADD COLUMN IF NOT EXISTS``, so the columns are
+        checked once per open.  This is additive and writes no rows; fresh
+        databases get the columns from ``V5_SCHEMA`` directly.
+        """
+        columns = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(case_trace_summary)"
+            ).fetchall()
+        }
+        if not columns:
+            return
+        for name, ddl in _TRACE_SUMMARY_ADDITIONS:
+            if name not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE case_trace_summary ADD COLUMN {name} {ddl}"
+                )
+        # This index depends on the step-2 column, so it cannot live in SCHEMA:
+        # an existing v5 table would fail before the ALTER above runs.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_trace_summary_project_module"
+            " ON case_trace_summary(project_id, module_id)"
+        )
+
+    def replace_trace_edges(
+        self,
+        project_id: str,
+        from_type: str,
+        from_id: str,
+        edges: Iterable[Any],
+    ) -> int:
+        """Replace every outgoing edge of one entity.
+
+        ``edges`` entries are ``(to_type, to_id)`` pairs or mappings with those
+        keys.  Repeating the call with the same input leaves the same rows, never
+        duplicates.
+        """
+        self._require_project(project_id)
+        from_type = require_enum(from_type, "from_type", _TRACE_ENTITY_TYPES)
+        from_id = require_text(from_id, "from_id", max_length=200)
+        pairs = sorted({_trace_edge_pair(edge) for edge in edges})
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM trace_edges WHERE project_id = ? AND from_type = ?"
+                " AND from_id = ?",
+                (project_id, from_type, from_id),
+            )
+            self._conn.executemany(
+                "INSERT INTO trace_edges (project_id, from_type, from_id, to_type, to_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                [
+                    (project_id, from_type, from_id, to_type, to_id)
+                    for to_type, to_id in pairs
+                ],
+            )
+        return len(pairs)
+
+    def get_dependents(
+        self, project_id: str, entity_type: str, entity_id: str
+    ) -> list[dict[str, str]]:
+        """Return the entities that name ``entity_type:entity_id`` as a parent.
+
+        Only direct dependents are returned; walking a source -> testpoint ->
+        case chain is the caller's job (the edges are already indexed for it).
+        """
+        self._require_project(project_id)
+        entity_type = require_enum(entity_type, "entity_type", _TRACE_ENTITY_TYPES)
+        entity_id = require_text(entity_id, "entity_id", max_length=200)
+        rows = self._fetchall(
+            "SELECT from_type, from_id FROM trace_edges"
+            " WHERE project_id = ? AND to_type = ? AND to_id = ?"
+            " ORDER BY from_type, from_id",
+            (project_id, entity_type, entity_id),
+        )
+        return [
+            {"from_type": row["from_type"], "from_id": row["from_id"]}
+            for row in rows
+        ]
+
+    def list_trace_edges(self, project_id: str) -> list[dict[str, str]]:
+        """Return every derived edge of one project, in stable order."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT from_type, from_id, to_type, to_id FROM trace_edges"
+            " WHERE project_id = ? ORDER BY from_type, from_id, to_type, to_id",
+            (project_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def get_case_trace_summary(self, case_id: str) -> dict[str, Any] | None:
+        """Return the cached trace badges of one case, or ``None`` when absent."""
+        row = self._fetchone(
+            "SELECT * FROM case_trace_summary WHERE case_id = ?", (case_id,)
+        )
+        if row is None:
+            return None
+        data = dict(row)
+        data["needs_links"] = bool(data.get("needs_links"))
+        data["needs_recheck"] = bool(data.get("needs_recheck"))
+        data["recheck_reasons"] = loads(data.get("recheck_reasons"), []) or []
+        return data
+
+    def _summary_row(
+        self,
+        summary: Mapping[str, Any],
+        *,
+        case_id: str,
+        project_id: str,
+    ) -> tuple[Any, ...]:
+        """Validate one summary object and return its positional INSERT row."""
+        return (
+            case_id,
+            project_id,
+            _summary_flag(summary.get("needs_links"), "needs_links", default=True),
+            _summary_flag(summary.get("needs_recheck"), "needs_recheck", default=False),
+            require_enum(
+                summary.get("trace_status"),
+                "trace_status",
+                _TRACE_REVIEW_STATUSES,
+                default="draft",
+            ),
+            dumps(_string_list(summary.get("recheck_reasons"), "recheck_reasons")),
+            _summary_count(summary.get("testpoint_count", 0), "testpoint_count"),
+            _summary_count(summary.get("source_count", 0), "source_count"),
+            optional_text(summary.get("module_id"), "module_id", max_length=200),
+            optional_text(summary.get("group_name"), "group_name", max_length=300),
+            optional_text(summary.get("api_method"), "api_method", max_length=20),
+            optional_text(summary.get("api_path"), "api_path", max_length=1000),
+            optional_text(summary.get("input_hash"), "input_hash", max_length=200),
+            optional_text(summary.get("checked_at"), "checked_at", max_length=80)
+            or utcnow_iso(),
+            require_enum(
+                summary.get("state"),
+                "state",
+                _TRACE_SUMMARY_STATES,
+                default="fresh",
+            ),
+        )
+
+    def upsert_case_trace_summary(self, summary: Mapping[str, Any]) -> dict[str, Any]:
+        """Insert or update the cached trace badges of one case."""
+        if not isinstance(summary, Mapping):
+            raise QaValidationError("trace summary must be an object")
+        case_id = require_text(summary.get("case_id"), "case_id", max_length=200)
+        row = self._fetchone("SELECT project_id FROM cases WHERE id = ?", (case_id,))
+        if row is None:
+            raise QaNotFoundError(f"case '{case_id}' not found")
+        project_id = str(row["project_id"])
+        declared_project = summary.get("project_id")
+        if declared_project not in (None, "") and declared_project != project_id:
+            raise QaValidationError("summary project_id does not match its case")
+        values = self._summary_row(summary, case_id=case_id, project_id=project_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO case_trace_summary (case_id, project_id, needs_links,"
+                " needs_recheck, trace_status, recheck_reasons, testpoint_count,"
+                " source_count, module_id, group_name, api_method, api_path,"
+                " input_hash, checked_at, state)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(case_id) DO UPDATE SET"
+                " project_id = excluded.project_id,"
+                " needs_links = excluded.needs_links,"
+                " needs_recheck = excluded.needs_recheck,"
+                " trace_status = excluded.trace_status,"
+                " recheck_reasons = excluded.recheck_reasons,"
+                " testpoint_count = excluded.testpoint_count,"
+                " source_count = excluded.source_count,"
+                " module_id = excluded.module_id,"
+                " group_name = excluded.group_name,"
+                " api_method = excluded.api_method,"
+                " api_path = excluded.api_path,"
+                " input_hash = excluded.input_hash,"
+                " checked_at = excluded.checked_at,"
+                " state = excluded.state",
+                values,
+            )
+        result = self.get_case_trace_summary(case_id)
+        assert result is not None  # the upsert above just wrote this row
+        return result
+
+    def mark_case_trace_stale(self, case_ids: Iterable[str]) -> int:
+        """Mark existing summaries stale without changing their cached values.
+
+        A case without a summary is left alone: ``None`` already means "unknown",
+        which is weaker than ``stale`` and must not be invented.
+        """
+        ids = list(
+            dict.fromkeys(
+                require_text(case_id, "case_id", max_length=200)
+                for case_id in case_ids
+            )
+        )
+        if not ids:
+            return 0
+        changed = 0
+        with self._lock, self._conn:
+            for case_id in ids:
+                cursor = self._conn.execute(
+                    "UPDATE case_trace_summary SET state = 'stale'"
+                    " WHERE case_id = ? AND state != 'stale'",
+                    (case_id,),
+                )
+                changed += cursor.rowcount
+        return changed
+
+    def _trace_file_row(
+        self, project_id: str, state: Mapping[str, Any]
+    ) -> tuple[Any, ...]:
+        """Validate one YAML file-state object and return its INSERT row."""
+        if not isinstance(state, Mapping):
+            raise QaValidationError("trace file state must be an object")
+        path = require_text(state.get("path"), "path", max_length=2000)
+        entity_type = optional_text(
+            state.get("entity_type"), "entity_type", max_length=40
+        )
+        if entity_type and entity_type not in _TRACE_FILE_ENTITY_TYPES:
+            raise QaValidationError(
+                "entity_type must be one of " + ", ".join(_TRACE_FILE_ENTITY_TYPES)
+            )
+        return (
+            project_id,
+            path,
+            entity_type,
+            optional_text(state.get("entity_id"), "entity_id", max_length=200),
+            optional_text(state.get("content_hash"), "content_hash", max_length=200),
+            _summary_count(state.get("mtime_ns", 0), "mtime_ns"),
+        )
+
+    def upsert_trace_file_state(
+        self, project_id: str, state: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Record (or refresh) the hash/mtime of one YAML source file."""
+        self._require_project(project_id)
+        row = self._trace_file_row(project_id, state)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO trace_file_state (project_id, path, entity_type,"
+                " entity_id, content_hash, mtime_ns) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(project_id, path) DO UPDATE SET"
+                " entity_type = excluded.entity_type,"
+                " entity_id = excluded.entity_id,"
+                " content_hash = excluded.content_hash,"
+                " mtime_ns = excluded.mtime_ns",
+                row,
+            )
+        return {
+            "path": row[1],
+            "entity_type": row[2],
+            "entity_id": row[3],
+            "content_hash": row[4],
+            "mtime_ns": row[5],
+        }
+
+    def delete_trace_file_state(self, project_id: str, path: str) -> int:
+        """Remove the recorded state of one YAML source file."""
+        self._require_project(project_id)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM trace_file_state WHERE project_id = ? AND path = ?",
+                (project_id, require_text(path, "path", max_length=2000)),
+            )
+        return cursor.rowcount
+
+    def replace_trace_index(
+        self,
+        project_id: str,
+        *,
+        edges: Iterable[Any] = (),
+        summaries: Iterable[Mapping[str, Any]] = (),
+        files: Iterable[Mapping[str, Any]] = (),
+    ) -> dict[str, int]:
+        """Replace every derived trace row of one project in one transaction.
+
+        This is the rebuild hook behind ``CaseFiles.reindex``: the tables are
+        derived from YAML, so the whole project slice is deleted and rewritten.
+        Repeating the call with the same input leaves the same rows.
+        """
+        self._require_project(project_id)
+        self.ensure_trace_index_schema()
+        known = {
+            str(row["id"])
+            for row in self._fetchall(
+                "SELECT id FROM cases WHERE project_id = ?", (project_id,)
+            )
+        }
+        edge_rows: list[tuple[Any, ...]] = []
+        for edge in edges:
+            if isinstance(edge, Mapping):
+                from_type = edge.get("from_type")
+                from_id = edge.get("from_id")
+                to_type = edge.get("to_type")
+                to_id = edge.get("to_id")
+            else:
+                try:
+                    from_type, from_id, to_type, to_id = edge
+                except (TypeError, ValueError):
+                    raise QaValidationError(
+                        "trace edge must be (from_type, from_id, to_type, to_id)"
+                    ) from None
+            from_type = require_enum(from_type, "from_type", _TRACE_ENTITY_TYPES)
+            from_id = require_text(from_id, "from_id", max_length=200)
+            to_type, to_id = _trace_edge_pair((to_type, to_id))
+            edge_rows.append((project_id, from_type, from_id, to_type, to_id))
+        edge_rows = sorted(set(edge_rows))
+
+        summary_rows: list[tuple[Any, ...]] = []
+        seen_cases: set[str] = set()
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                raise QaValidationError("trace summary must be an object")
+            case_id = require_text(summary.get("case_id"), "case_id", max_length=200)
+            if case_id not in known:
+                raise QaValidationError(
+                    f"trace summary references case '{case_id}' outside project {project_id}"
+                )
+            if case_id in seen_cases:
+                raise QaValidationError(f"duplicate trace summary for case '{case_id}'")
+            seen_cases.add(case_id)
+            summary_rows.append(
+                self._summary_row(summary, case_id=case_id, project_id=project_id)
+            )
+
+        file_rows: list[tuple[Any, ...]] = []
+        seen_paths: set[str] = set()
+        for state in files:
+            row = self._trace_file_row(project_id, state)
+            path = str(row[1])
+            if path in seen_paths:
+                raise QaValidationError(f"duplicate trace file state for '{path}'")
+            seen_paths.add(path)
+            file_rows.append(row)
+
+        with self._transaction():
+            self._conn.execute("DELETE FROM trace_edges WHERE project_id = ?", (project_id,))
+            self._conn.execute(
+                "DELETE FROM case_trace_summary WHERE project_id = ?", (project_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM trace_file_state WHERE project_id = ?", (project_id,)
+            )
+            self._conn.executemany(
+                "INSERT INTO trace_edges (project_id, from_type, from_id, to_type, to_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                edge_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO case_trace_summary (case_id, project_id, needs_links,"
+                " needs_recheck, trace_status, recheck_reasons, testpoint_count,"
+                " source_count, module_id, group_name, api_method, api_path,"
+                " input_hash, checked_at, state)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                summary_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO trace_file_state (project_id, path, entity_type, entity_id,"
+                " content_hash, mtime_ns) VALUES (?, ?, ?, ?, ?, ?)",
+                file_rows,
+            )
+        return {
+            "edges": len(edge_rows),
+            "summaries": len(summary_rows),
+            "files": len(file_rows),
+        }
+
+    def trace_index_stats(self, project_id: str) -> dict[str, int]:
+        """Return row counts of the derived trace index of one project."""
+        self._require_project(project_id)
+        counts: dict[str, int] = {}
+        for key, table in (
+            ("edges", "trace_edges"),
+            ("summaries", "case_trace_summary"),
+            ("files", "trace_file_state"),
+        ):
+            row = self._fetchone(
+                f"SELECT COUNT(*) AS total FROM {table} WHERE project_id = ?",
+                (project_id,),
+            )
+            counts[key] = int(row["total"]) if row is not None else 0
+        stale = self._fetchone(
+            "SELECT COUNT(*) AS total FROM case_trace_summary"
+            " WHERE project_id = ? AND state = 'stale'",
+            (project_id,),
+        )
+        recheck = self._fetchone(
+            "SELECT COUNT(*) AS total FROM case_trace_summary"
+            " WHERE project_id = ? AND needs_recheck = 1",
+            (project_id,),
+        )
+        counts["stale"] = int(stale["total"]) if stale is not None else 0
+        counts["needs_recheck"] = int(recheck["total"]) if recheck is not None else 0
+        return counts
+
+    def get_trace_file_state(
+        self, project_id: str, path: str
+    ) -> dict[str, Any] | None:
+        """Return the recorded hash/mtime of one YAML file, or ``None``."""
+        self._require_project(project_id)
+        row = self._fetchone(
+            "SELECT * FROM trace_file_state WHERE project_id = ? AND path = ?",
+            (project_id, require_text(path, "path", max_length=2000)),
+        )
+        return dict(row) if row is not None else None
+
+    def list_trace_file_states(self, project_id: str) -> list[dict[str, Any]]:
+        """Return every recorded YAML file state of one project."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT * FROM trace_file_state WHERE project_id = ? ORDER BY path",
+            (project_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def list_trace_entity_ids(
+        self, project_id: str, entity_type: str
+    ) -> list[str]:
+        """Return formal entity IDs recorded in the trace file state."""
+        self._require_project(project_id)
+        entity_type = require_enum(entity_type, "entity_type", _TRACE_ENTITY_TYPES)
+        rows = self._fetchall(
+            "SELECT DISTINCT entity_id FROM trace_file_state"
+            " WHERE project_id = ? AND entity_type = ? AND path NOT LIKE 'draft/%'"
+            " ORDER BY entity_id",
+            (project_id, entity_type),
+        )
+        return [str(row["entity_id"]) for row in rows]
 
     def case_codes(self, project_id: str) -> set[str]:
         """Return every case code an index row already uses in one project."""

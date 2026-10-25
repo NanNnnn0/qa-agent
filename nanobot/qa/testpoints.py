@@ -360,7 +360,7 @@ def list_assets(store: Any, project_id: str) -> dict[str, Any]:
             "legacy": bool(case.get("legacy")),
         }
         for case in cases
-        if not case.get("testpoints") and not case.get("sources")
+        if case.get("needs_links", not case.get("testpoints") and not case.get("sources"))
     ]
     if not (directory / "project.yaml").is_file():
         return {

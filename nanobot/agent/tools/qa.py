@@ -54,6 +54,10 @@ def _dumps(payload: Any) -> str:
 
 
 def _case_summary(case: dict[str, Any]) -> dict[str, Any]:
+    steps = case.get("steps")
+    step_count = len(steps) if isinstance(steps, list) else int(
+        case.get("step_count", 0) or 0
+    )
     return {
         "id": case["id"],
         "code": case["code"],
@@ -62,8 +66,8 @@ def _case_summary(case: dict[str, Any]) -> dict[str, Any]:
         "priority": case["priority"],
         "status": case["status"],
         "tags": case.get("tags", []),
-        "has_api": bool(case.get("api")),
-        "steps": len(case.get("steps") or []),
+        "has_api": bool(case.get("has_api", case.get("api"))),
+        "steps": step_count,
     }
 
 
