@@ -2,7 +2,7 @@
 
 - 日期：2026-10-25
 - 工作区：`/opt/worktrees/qa-case-storage-scaling`
-- 状态：**仅方案，本轮不改代码**
+- 状态：**已实施（2026-10-26）；验收记录见 `qa-case-storage-scaling-acceptance.md`**
 - 基线：当前工作区 `f1e31f9` + 未提交改动（上一轮 14 个文件，约 3981 行新增）
 - 关联：`docs/design/qa-case-storage-scaling-summary.md` 第 4 节「已知限制与后续」第 1～6 条
 

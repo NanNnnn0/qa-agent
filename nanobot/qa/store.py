@@ -15,6 +15,7 @@ HTTP API, the built-in tools, the MCP server and the test suite.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping
@@ -55,6 +56,19 @@ from nanobot.qa.validation import (
 )
 from nanobot.qa.workspace import ensure_project_directory
 
+#: Case IDs that carry a numeric sequence are allocated from the ledger.
+_CASE_ID_CLAIM_RE = re.compile(
+    r"^TC-(?P<module>[A-Z][A-Z0-9_]{0,31})-(?P<seq>\d{1,6})$"
+)
+
+
+def _claim_code_number(code: str, prefix: str) -> int | None:
+    """Return the numeric suffix of an auto-shaped code, else ``None``."""
+    if not code.startswith(prefix):
+        return None
+    suffix = code[len(prefix):]
+    return int(suffix) if suffix.isdigit() else None
+
 # v3 covers additive changes made in parallel: the YAML case-index columns
 # (derived/legacy_id/yaml_path), the schedules table, and the API asset tables
 # (api_operations, api_case_metadata, api_case_revisions, api_workflows).
@@ -64,7 +78,9 @@ from nanobot.qa.workspace import ensure_project_directory
 # from the YAML library, so dropping one loses no source data.  The SCHEMA
 # script runs on every open, so a database already at v3/v4 still gains the
 # missing structures; the migration below only upgrades older databases.
-SCHEMA_VERSION = 5
+# v6 adds the case ID/code allocation ledger and the import-batch journal.
+# Both are derived/recovery data, not a second source of truth.
+SCHEMA_VERSION = 6
 
 #: Version-5 DDL.  It is appended to ``SCHEMA`` (which runs on every open) and
 #: run again by the v5 migration, so an interrupted upgrade or a manually
@@ -138,6 +154,75 @@ CREATE INDEX IF NOT EXISTS idx_cases_project_code
     ON cases(project_id, code);
 CREATE INDEX IF NOT EXISTS idx_cases_project_kind_code
     ON cases(project_id, kind, code);
+"""
+
+#: Version-6 DDL.  Case IDs and human codes are allocated from a ledger instead
+#: of scanning every YAML file.  The ledger is derived data: ``reindex`` and
+#: ``sync_case_claims`` rebuild it from the files, and dropping the tables only
+#: loses the conflict report, never a case.  ``case_import_batches`` is the
+#: crash-recovery journal for bulk imports.
+V6_SCHEMA = """
+CREATE TABLE IF NOT EXISTS case_code_claims (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    case_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'reserved',
+    source TEXT NOT NULL DEFAULT 'yaml',
+    number INTEGER,
+    conflict INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, code, source, case_id)
+);
+CREATE INDEX IF NOT EXISTS idx_case_code_claims_number
+    ON case_code_claims(project_id, kind, number)
+    WHERE number IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS case_id_claims (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL,
+    module TEXT NOT NULL,
+    seq INTEGER,
+    state TEXT NOT NULL DEFAULT 'reserved',
+    source TEXT NOT NULL DEFAULT 'yaml',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, case_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_case_id_claims_seq
+    ON case_id_claims(project_id, module, seq)
+    WHERE seq IS NOT NULL AND source = 'yaml';
+CREATE INDEX IF NOT EXISTS idx_case_id_claims_module
+    ON case_id_claims(project_id, module, seq);
+
+CREATE TABLE IF NOT EXISTS case_claim_conflicts (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    entity TEXT NOT NULL,
+    value TEXT NOT NULL,
+    case_ids TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    detected_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, entity, value)
+);
+
+CREATE TABLE IF NOT EXISTS case_import_batches (
+    batch_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'compat',
+    status TEXT NOT NULL DEFAULT 'preparing',
+    manifest TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_import_batches_project
+    ON case_import_batches(project_id, status, updated_at);
+
+-- Search/filter support: module and operation filters are EXISTS subqueries,
+-- so the covering index belongs on the subquery table, not on cases.
+CREATE INDEX IF NOT EXISTS idx_api_case_metadata_operation_case
+    ON api_case_metadata(operation_id, case_id);
+CREATE INDEX IF NOT EXISTS idx_trace_edges_target_from
+    ON trace_edges(project_id, to_type, to_id, from_type);
 """
 
 SCHEMA = """
@@ -333,7 +418,7 @@ CREATE TABLE IF NOT EXISTS api_workflows (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_workflows_idempotency
     ON api_workflows(idempotency_key) WHERE idempotency_key != '';
-""" + V5_SCHEMA
+""" + V5_SCHEMA + V6_SCHEMA
 
 _JSON_CASE_FIELDS = ("steps", "api", "tags")
 _JSON_PROJECT_FIELDS = ("default_env",)
@@ -579,8 +664,10 @@ class QaStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._migrate()
+        self._ensure_case_claim_indexes()
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -634,9 +721,157 @@ class QaStore:
             # (or a dropped derived table); no rows are written until the next
             # reindex, so the upgrade itself is idempotent.
             self._conn.executescript(V5_SCHEMA)
+        if version < 6:
+            # The allocation ledger is derived from the cases table.  The
+            # unique indexes are created after de-duplicating historical rows,
+            # so a database with two YAML rows sharing a code upgrades without
+            # failing; the losers are recorded as conflicts.
+            self._conn.executescript(V6_SCHEMA)
+            self._backfill_case_claims()
         # The API asset tables come from SCHEMA on every open, so they need no
         # migration branch; this marker only records the shared version.
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _backfill_case_claims(self) -> None:
+        """Seed the v6 allocation ledger from the existing ``cases`` rows."""
+        now = utcnow_iso()
+        self._conn.execute("DELETE FROM case_claim_conflicts")
+        self._conn.execute("DELETE FROM case_code_claims")
+        self._conn.execute("DELETE FROM case_id_claims")
+        rows = self._conn.execute(
+            "SELECT c.id, c.project_id, c.code, c.kind, c.status, c.derived, p.key"
+            " FROM cases c JOIN projects p ON p.id = c.project_id"
+        ).fetchall()
+        for row in rows:
+            source = "yaml" if int(row["derived"] or 0) == 1 else "legacy"
+            code = str(row["code"] or row["id"]).strip().upper()
+            kind = str(row["kind"] or "api")
+            status = str(row["status"] or "draft")
+            state = (
+                "reviewed"
+                if status == "ready"
+                else "deprecated"
+                if status == "deprecated"
+                else "draft"
+            )
+            prefix = f"{str(row['key']).upper()}-{kind.upper()}-"
+            number: int | None = None
+            if code.startswith(prefix):
+                suffix = code[len(prefix):]
+                if suffix.isdigit():
+                    number = int(suffix)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO case_code_claims"
+                " (project_id, code, case_id, kind, state, source, number,"
+                "  conflict, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (
+                    row["project_id"],
+                    code,
+                    row["id"],
+                    kind,
+                    state,
+                    source,
+                    number,
+                    now,
+                ),
+            )
+            if source != "yaml":
+                continue
+            match = _CASE_ID_CLAIM_RE.match(str(row["id"]))
+            if match is None:
+                continue
+            self._conn.execute(
+                "INSERT OR IGNORE INTO case_id_claims"
+                " (project_id, case_id, module, seq, state, source, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'yaml', ?)",
+                (
+                    row["project_id"],
+                    row["id"],
+                    match.group("module"),
+                    int(match.group("seq")),
+                    state,
+                    now,
+                ),
+            )
+
+    def _dedupe_case_claims(self) -> None:
+        """Mark duplicate YAML claims as conflicts before unique indexes exist."""
+        now = utcnow_iso()
+        duplicates = self._conn.execute(
+            "SELECT project_id, code, GROUP_CONCAT(case_id) AS ids, COUNT(*) AS total"
+            " FROM case_code_claims"
+            " WHERE source = 'yaml' AND conflict = 0"
+            " GROUP BY project_id, code HAVING total > 1"
+        ).fetchall()
+        for row in duplicates:
+            ids = sorted(str(row["ids"]).split(","))
+            losers = ids[1:]
+            if not losers:
+                continue
+            placeholders = ", ".join("?" for _ in losers)
+            self._conn.execute(
+                "UPDATE case_code_claims SET conflict = 1, updated_at = ?"
+                " WHERE project_id = ? AND source = 'yaml' AND code = ?"
+                f" AND case_id IN ({placeholders})",
+                (now, row["project_id"], row["code"], *losers),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO case_claim_conflicts"
+                " (project_id, entity, value, case_ids, reason, detected_at)"
+                " VALUES (?, 'code', ?, ?, ?, ?)",
+                (
+                    row["project_id"],
+                    row["code"],
+                    dumps(ids),
+                    "duplicate yaml case code",
+                    now,
+                ),
+            )
+        by_case = self._conn.execute(
+            "SELECT project_id, case_id, GROUP_CONCAT(code) AS codes, COUNT(*) AS total"
+            " FROM case_code_claims"
+            " WHERE source = 'yaml' AND conflict = 0 AND case_id != ''"
+            " GROUP BY project_id, case_id HAVING total > 1"
+        ).fetchall()
+        for row in by_case:
+            codes = sorted(str(row["codes"]).split(","))
+            losers = codes[1:]
+            if not losers:
+                continue
+            placeholders = ", ".join("?" for _ in losers)
+            self._conn.execute(
+                "UPDATE case_code_claims SET conflict = 1, updated_at = ?"
+                " WHERE project_id = ? AND source = 'yaml' AND case_id = ?"
+                f" AND code IN ({placeholders})",
+                (now, row["project_id"], row["case_id"], *losers),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO case_claim_conflicts"
+                " (project_id, entity, value, case_ids, reason, detected_at)"
+                " VALUES (?, 'code', ?, ?, ?, ?)",
+                (
+                    row["project_id"],
+                    row["case_id"],
+                    dumps(codes),
+                    "one case claimed more than one code",
+                    now,
+                ),
+            )
+
+    def _ensure_case_claim_indexes(self) -> None:
+        """Create the unique claim indexes after repairing historical rows."""
+        self._dedupe_case_claims()
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_case_code_claims_yaml"
+            " ON case_code_claims(project_id, code)"
+            " WHERE source = 'yaml' AND conflict = 0"
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_case_code_claims_case"
+            " ON case_code_claims(project_id, case_id)"
+            " WHERE source = 'yaml' AND case_id != '' AND conflict = 0"
+        )
 
     def _drop_case_code_constraint(self) -> None:
         """Rebuild ``cases`` without ``UNIQUE (project_id, code)``.
@@ -1145,15 +1380,23 @@ class QaStore:
             clauses.append("c.project_id = ?")
             params.append(project_id)
         if module_id:
-            clauses.append(
-                "EXISTS (SELECT 1 FROM case_trace_summary s"
-                " WHERE s.case_id = c.id AND s.module_id = ?)"
-            )
-            params.append(require_text(module_id, "module_id", max_length=200))
+            module_value = require_text(module_id, "module_id", max_length=200)
+            if project_id:
+                clauses.append(
+                    "c.id IN (SELECT s.case_id FROM case_trace_summary s"
+                    " WHERE s.project_id = ? AND s.module_id = ?)"
+                )
+                params.extend([project_id, module_value])
+            else:
+                clauses.append(
+                    "c.id IN (SELECT s.case_id FROM case_trace_summary s"
+                    " WHERE s.module_id = ?)"
+                )
+                params.append(module_value)
         if operation_id:
             clauses.append(
-                "EXISTS (SELECT 1 FROM api_case_metadata m"
-                " WHERE m.case_id = c.id AND m.operation_id = ?)"
+                "c.id IN (SELECT m.case_id FROM api_case_metadata m"
+                " WHERE m.operation_id = ?)"
             )
             params.append(require_text(operation_id, "operation_id", max_length=200))
         if kind:
@@ -1559,6 +1802,14 @@ class QaStore:
             "CREATE INDEX IF NOT EXISTS idx_case_trace_summary_project_module"
             " ON case_trace_summary(project_id, module_id)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_trace_summary_module"
+            " ON case_trace_summary(project_id, module_id, case_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_trace_summary_module_only"
+            " ON case_trace_summary(module_id, case_id)"
+        )
 
     def replace_trace_edges(
         self,
@@ -1900,6 +2151,122 @@ class QaStore:
             "files": len(file_rows),
         }
 
+    def replace_project_index(
+        self,
+        project_id: str,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        edges: Iterable[Any] = (),
+        summaries: Iterable[Mapping[str, Any]] = (),
+        files: Iterable[Mapping[str, Any]] = (),
+    ) -> dict[str, int]:
+        """Replace case rows and trace rows of one project in one transaction.
+
+        A full rebuild parses the YAML once and then commits the whole derived
+        slice here.  If anything fails, the old cases, summaries, edges and file
+        states remain in place instead of leaving a half-rebuilt index.
+        """
+        self._require_project(project_id)
+        self.ensure_trace_index_schema()
+        row_list = list(rows)
+        prepared = self._prepared_derived_cases(row_list)
+        known = {str(row["id"]) for row in row_list}
+
+        edge_rows: list[tuple[Any, ...]] = []
+        for edge in edges:
+            if isinstance(edge, Mapping):
+                from_type = edge.get("from_type")
+                from_id = edge.get("from_id")
+                to_type = edge.get("to_type")
+                to_id = edge.get("to_id")
+            else:
+                try:
+                    from_type, from_id, to_type, to_id = edge
+                except (TypeError, ValueError):
+                    raise QaValidationError(
+                        "trace edge must be (from_type, from_id, to_type, to_id)"
+                    ) from None
+            from_type = require_enum(from_type, "from_type", _TRACE_ENTITY_TYPES)
+            from_id = require_text(from_id, "from_id", max_length=200)
+            to_type, to_id = _trace_edge_pair((to_type, to_id))
+            edge_rows.append((project_id, from_type, from_id, to_type, to_id))
+        edge_rows = sorted(set(edge_rows))
+
+        summary_rows: list[tuple[Any, ...]] = []
+        seen_cases: set[str] = set()
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                raise QaValidationError("trace summary must be an object")
+            case_id = require_text(summary.get("case_id"), "case_id", max_length=200)
+            if case_id not in known:
+                raise QaValidationError(
+                    f"trace summary references case '{case_id}'"
+                    f" outside project {project_id}"
+                )
+            if case_id in seen_cases:
+                raise QaValidationError(f"duplicate trace summary for case '{case_id}'")
+            seen_cases.add(case_id)
+            summary_rows.append(
+                self._summary_row(summary, case_id=case_id, project_id=project_id)
+            )
+
+        file_rows: list[tuple[Any, ...]] = []
+        seen_paths: set[str] = set()
+        for state in files:
+            row = self._trace_file_row(project_id, state)
+            path = str(row[1])
+            if path in seen_paths:
+                raise QaValidationError(f"duplicate trace file state for '{path}'")
+            seen_paths.add(path)
+            file_rows.append(row)
+
+        with self._transaction():
+            self._conn.execute(
+                "DELETE FROM trace_edges WHERE project_id = ?", (project_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM case_trace_summary WHERE project_id = ?", (project_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM trace_file_state WHERE project_id = ?", (project_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM cases WHERE project_id = ? AND derived = 1",
+                (project_id,),
+            )
+            self._conn.executemany(
+                "INSERT INTO cases (id, project_id, code, title, kind, priority,"
+                " status, preconditions, steps, api, expected, tags, source,"
+                " author, legacy_id, yaml_path, derived, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                prepared,
+            )
+            self._conn.executemany(
+                "INSERT INTO trace_edges (project_id, from_type, from_id, to_type, to_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                edge_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO case_trace_summary (case_id, project_id, needs_links,"
+                " needs_recheck, trace_status, recheck_reasons, testpoint_count,"
+                " source_count, module_id, group_name, api_method, api_path,"
+                " input_hash, checked_at, state)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                summary_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO trace_file_state (project_id, path, entity_type,"
+                " entity_id, content_hash, mtime_ns)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                file_rows,
+            )
+        return {
+            "cases": len(prepared),
+            "edges": len(edge_rows),
+            "summaries": len(summary_rows),
+            "files": len(file_rows),
+        }
+
     def trace_index_stats(self, project_id: str) -> dict[str, int]:
         """Return row counts of the derived trace index of one project."""
         self._require_project(project_id)
@@ -1971,6 +2338,632 @@ class QaStore:
                 "SELECT code FROM cases WHERE project_id = ?", (project_id,)
             )
         return {str(row["code"]).upper() for row in rows if row["code"]}
+
+    def case_claim_rows(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the case columns the allocation sync needs in one query."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT id, code, kind, status, derived FROM cases"
+            " WHERE project_id = ?",
+            (project_id,),
+        )
+        return [_row_to_dict(row) for row in rows]
+
+    def list_case_id_claims(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the numeric ID ledger rows of one project."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT case_id, module, seq, state, source FROM case_id_claims"
+            " WHERE project_id = ?",
+            (project_id,),
+        )
+        return [_row_to_dict(row) for row in rows]
+
+    def list_case_claims(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the v6 code/ID allocation ledger of one project."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT * FROM case_code_claims WHERE project_id = ? ORDER BY code",
+            (project_id,),
+        )
+        return [_row_to_dict(row) for row in rows]
+
+    def list_case_claim_conflicts(self, project_id: str) -> list[dict[str, Any]]:
+        """Return the last sync/migration conflicts of one project."""
+        self._require_project(project_id)
+        rows = self._fetchall(
+            "SELECT * FROM case_claim_conflicts WHERE project_id = ?"
+            " ORDER BY entity, value",
+            (project_id,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            item["case_ids"] = loads(item.get("case_ids"), []) or []
+            result.append(item)
+        return result
+
+    def allocate_case_identity(
+        self,
+        project_id: str,
+        *,
+        kind: str,
+        module: str,
+        code: str | None = None,
+        count: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Reserve one or more case IDs/codes in a single write transaction.
+
+        The ledger has partial unique indexes on the YAML-owned code and ID
+        sequence, so two writers that computed the same next number cannot both
+        commit.  Auto-allocation retries on that race; an explicit code reports
+        a conflict instead of silently reusing it.
+        """
+        project = self._require_project(project_id)
+        kind_value = require_enum(kind, "kind", CASE_KINDS)
+        module_value = require_text(module, "module", max_length=32)
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+            or count > 500
+        ):
+            raise QaValidationError("count must be between 1 and 500")
+        explicit: str | None = None
+        if code is not None:
+            if count != 1:
+                raise QaValidationError(
+                    "an explicit code can only be allocated once per call"
+                )
+            if not isinstance(code, str) or not code.strip():
+                raise QaValidationError("code must be a non-empty string")
+            explicit = code.strip().upper()
+        prefix = f"{str(project['key']).upper()}-{kind_value.upper()}-"
+        now = utcnow_iso()
+        for _attempt in range(5):
+            try:
+                with self._transaction() as conn:
+                    allocated: list[dict[str, Any]] = []
+                    for _ in range(count):
+                        if explicit is not None:
+                            normalized = explicit
+                            clash = conn.execute(
+                                "SELECT case_id, source FROM case_code_claims"
+                                " WHERE project_id = ? AND code = ? LIMIT 1",
+                                (project_id, normalized),
+                            ).fetchone()
+                            if clash is not None:
+                                raise QaConflictError(
+                                    f"case code '{normalized}' already exists"
+                                    f" in this project ({clash['source']}"
+                                    f" {clash['case_id']})"
+                                )
+                            number = _claim_code_number(normalized, prefix)
+                        else:
+                            row = conn.execute(
+                                "SELECT COALESCE(MAX(number), 0) AS highest"
+                                " FROM case_code_claims"
+                                " WHERE project_id = ? AND kind = ?"
+                                " AND number IS NOT NULL",
+                                (project_id, kind_value),
+                            ).fetchone()
+                            number = int(row["highest"] or 0) + 1
+                            normalized = f"{prefix}{number:03d}"
+                            while conn.execute(
+                                "SELECT 1 FROM case_code_claims"
+                                " WHERE project_id = ? AND code = ?",
+                                (project_id, normalized),
+                            ).fetchone() is not None:
+                                number += 1
+                                normalized = f"{prefix}{number:03d}"
+                        row = conn.execute(
+                            "SELECT COALESCE(MAX(seq), 0) AS highest"
+                            " FROM case_id_claims"
+                            " WHERE project_id = ? AND module = ?"
+                            " AND seq IS NOT NULL",
+                            (project_id, module_value),
+                        ).fetchone()
+                        seq = int(row["highest"] or 0) + 1
+                        case_id = f"TC-{module_value}-{seq:03d}"
+                        while conn.execute(
+                            "SELECT 1 FROM case_id_claims"
+                            " WHERE project_id = ? AND case_id = ?",
+                            (project_id, case_id),
+                        ).fetchone() is not None:
+                            seq += 1
+                            case_id = f"TC-{module_value}-{seq:03d}"
+                        if seq > 999_999:
+                            raise QaConflictError(
+                                f"case ID space exhausted in module {module_value}"
+                            )
+                        conn.execute(
+                            "INSERT INTO case_code_claims"
+                            " (project_id, code, case_id, kind, state, source,"
+                            "  number, conflict, updated_at)"
+                            " VALUES (?, ?, ?, ?, 'reserved', 'yaml', ?, 0, ?)",
+                            (
+                                project_id,
+                                normalized,
+                                case_id,
+                                kind_value,
+                                number,
+                                now,
+                            ),
+                        )
+                        conn.execute(
+                            "INSERT INTO case_id_claims"
+                            " (project_id, case_id, module, seq, state, source,"
+                            "  updated_at)"
+                            " VALUES (?, ?, ?, ?, 'reserved', 'yaml', ?)",
+                            (project_id, case_id, module_value, seq, now),
+                        )
+                        allocated.append(
+                            {
+                                "case_id": case_id,
+                                "code": normalized,
+                                "kind": kind_value,
+                                "module": module_value,
+                                "seq": seq,
+                                "number": number,
+                                "state": "reserved",
+                            }
+                        )
+                    return allocated
+            except sqlite3.IntegrityError:
+                if explicit is not None:
+                    raise QaConflictError(
+                        f"case code '{explicit}' already exists in this project"
+                    ) from None
+                continue
+        raise QaConflictError(
+            "could not allocate a unique case code after 5 attempts"
+        )
+
+    def confirm_case_claims(
+        self,
+        project_id: str,
+        case_ids: Iterable[str],
+        *,
+        state: str = "draft",
+    ) -> int:
+        """Mark reserved claims as the case's current review state."""
+        state_value = require_enum(
+            state, "state", ("draft", "reviewed", "deprecated")
+        )
+        ids = list(
+            dict.fromkeys(
+                require_text(case_id, "case_id", max_length=200)
+                for case_id in case_ids
+            )
+        )
+        if not ids:
+            return 0
+        now = utcnow_iso()
+        with self._transaction() as conn:
+            for case_id in ids:
+                conn.execute(
+                    "UPDATE case_code_claims SET state = ?, updated_at = ?"
+                    " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                    (state_value, now, project_id, case_id),
+                )
+                conn.execute(
+                    "UPDATE case_id_claims SET state = ?, updated_at = ?"
+                    " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                    (state_value, now, project_id, case_id),
+                )
+        return len(ids)
+
+    def release_case_claims(
+        self, project_id: str, case_ids: Iterable[str]
+    ) -> int:
+        """Drop reserved claims after a failed write (never a confirmed one)."""
+        ids = list(
+            dict.fromkeys(
+                require_text(case_id, "case_id", max_length=200)
+                for case_id in case_ids
+            )
+        )
+        if not ids:
+            return 0
+        released = 0
+        with self._transaction() as conn:
+            for case_id in ids:
+                cursor = conn.execute(
+                    "DELETE FROM case_code_claims"
+                    " WHERE project_id = ? AND case_id = ?"
+                    " AND source = 'yaml' AND state = 'reserved'",
+                    (project_id, case_id),
+                )
+                released += cursor.rowcount
+                conn.execute(
+                    "DELETE FROM case_id_claims"
+                    " WHERE project_id = ? AND case_id = ?"
+                    " AND source = 'yaml' AND state = 'reserved'",
+                    (project_id, case_id),
+                )
+        return released
+
+    def replace_case_code_claim(
+        self, project_id: str, case_id: str, code: str, kind: str
+    ) -> str:
+        """Move one case's YAML code claim; conflicts are reported, not merged."""
+        project = self._require_project(project_id)
+        normalized = require_text(code, "code", max_length=64).upper()
+        kind_value = require_enum(kind, "kind", CASE_KINDS)
+        prefix = f"{str(project['key']).upper()}-{kind_value.upper()}-"
+        number = _claim_code_number(normalized, prefix)
+        now = utcnow_iso()
+        with self._transaction() as conn:
+            clash = conn.execute(
+                "SELECT case_id, source FROM case_code_claims"
+                " WHERE project_id = ? AND code = ? AND case_id != ? LIMIT 1",
+                (project_id, normalized, case_id),
+            ).fetchone()
+            if clash is not None:
+                raise QaConflictError(
+                    f"case code '{normalized}' already exists in this project"
+                    f" ({clash['source']} {clash['case_id']})"
+                )
+            old = conn.execute(
+                "SELECT state FROM case_code_claims"
+                " WHERE project_id = ? AND case_id = ? AND source = 'yaml'"
+                " LIMIT 1",
+                (project_id, case_id),
+            ).fetchone()
+            state = str(old["state"]) if old is not None else "draft"
+            conn.execute(
+                "DELETE FROM case_code_claims"
+                " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                (project_id, case_id),
+            )
+            conn.execute(
+                "INSERT INTO case_code_claims"
+                " (project_id, code, case_id, kind, state, source, number,"
+                "  conflict, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'yaml', ?, 0, ?)",
+                (
+                    project_id,
+                    normalized,
+                    case_id,
+                    kind_value,
+                    state,
+                    number,
+                    now,
+                ),
+            )
+        return normalized
+
+    def sync_case_claims(
+        self,
+        project_id: str,
+        claims: Iterable[Mapping[str, Any]],
+        *,
+        seen_case_ids: Iterable[str],
+        conflicts: Iterable[Mapping[str, Any]] = (),
+    ) -> dict[str, int]:
+        """Replace the YAML-owned claims of a project from one filesystem sync.
+
+        Reserved claims without a file are preserved: they belong to an
+        in-flight create whose YAML write has not happened yet.  Legacy claims
+        are never touched.
+        """
+        self._require_project(project_id)
+        claim_list = list(claims)
+        seen = list(dict.fromkeys(str(item) for item in seen_case_ids))
+        conflict_list = list(conflicts)
+        now = utcnow_iso()
+        with self._transaction() as conn:
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _qa_seen_case_ids"
+                " (case_id TEXT PRIMARY KEY)"
+            )
+            conn.execute("DELETE FROM _qa_seen_case_ids")
+            conn.executemany(
+                "INSERT OR IGNORE INTO _qa_seen_case_ids (case_id) VALUES (?)",
+                [(case_id,) for case_id in seen],
+            )
+            conn.execute(
+                "DELETE FROM case_code_claims WHERE project_id = ?"
+                " AND source = 'yaml' AND (state != 'reserved' OR case_id IN"
+                " (SELECT case_id FROM _qa_seen_case_ids))",
+                (project_id,),
+            )
+            conn.execute(
+                "DELETE FROM case_id_claims WHERE project_id = ?"
+                " AND source = 'yaml' AND (state != 'reserved' OR case_id IN"
+                " (SELECT case_id FROM _qa_seen_case_ids))",
+                (project_id,),
+            )
+            for claim in claim_list:
+                case_id = require_text(
+                    claim.get("case_id"), "case_id", max_length=200
+                )
+                code = require_text(
+                    claim.get("code"), "code", max_length=64
+                ).upper()
+                kind = require_enum(claim.get("kind"), "kind", CASE_KINDS)
+                state = require_enum(
+                    claim.get("state") or "draft",
+                    "state",
+                    ("draft", "reviewed", "deprecated"),
+                )
+                number = claim.get("number")
+                if number is not None and (
+                    isinstance(number, bool)
+                    or not isinstance(number, int)
+                    or number < 0
+                ):
+                    raise QaValidationError("number must be a non-negative integer")
+                conflict = 1 if claim.get("conflict") else 0
+                conn.execute(
+                    "INSERT OR REPLACE INTO case_code_claims"
+                    " (project_id, code, case_id, kind, state, source, number,"
+                    "  conflict, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, 'yaml', ?, ?, ?)",
+                    (
+                        project_id,
+                        code,
+                        case_id,
+                        kind,
+                        state,
+                        number,
+                        conflict,
+                        now,
+                    ),
+                )
+                module = claim.get("module")
+                seq = claim.get("seq")
+                if isinstance(module, str) and module and isinstance(seq, int):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO case_id_claims"
+                        " (project_id, case_id, module, seq, state, source,"
+                        "  updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, 'yaml', ?)",
+                        (project_id, case_id, module, seq, state, now),
+                    )
+            conn.execute(
+                "DELETE FROM case_claim_conflicts WHERE project_id = ?",
+                (project_id,),
+            )
+            for conflict in conflict_list:
+                conn.execute(
+                    "INSERT OR REPLACE INTO case_claim_conflicts"
+                    " (project_id, entity, value, case_ids, reason, detected_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        project_id,
+                        require_text(
+                            conflict.get("entity"), "entity", max_length=20
+                        ),
+                        require_text(
+                            conflict.get("value"), "value", max_length=200
+                        ),
+                        dumps(list(conflict.get("case_ids") or [])),
+                        str(conflict.get("reason") or ""),
+                        now,
+                    ),
+                )
+            conn.execute("DROP TABLE IF EXISTS _qa_seen_case_ids")
+        return {"codes": len(claim_list), "conflicts": len(conflict_list)}
+
+    def apply_case_claim_changes(
+        self,
+        project_id: str,
+        claims: Iterable[Mapping[str, Any]],
+        *,
+        delete_case_ids: Iterable[str] = (),
+        conflicts: Iterable[Mapping[str, Any]] = (),
+    ) -> dict[str, int]:
+        """Apply an incremental claim diff (used by the per-write sync)."""
+        self._require_project(project_id)
+        claim_list = list(claims)
+        deletes = list(
+            dict.fromkeys(
+                require_text(case_id, "case_id", max_length=200)
+                for case_id in delete_case_ids
+            )
+        )
+        conflict_list = list(conflicts)
+        now = utcnow_iso()
+        with self._transaction() as conn:
+            for case_id in deletes:
+                conn.execute(
+                    "DELETE FROM case_code_claims"
+                    " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                    (project_id, case_id),
+                )
+                conn.execute(
+                    "DELETE FROM case_id_claims"
+                    " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                    (project_id, case_id),
+                )
+            for claim in claim_list:
+                case_id = require_text(
+                    claim.get("case_id"), "case_id", max_length=200
+                )
+                code = require_text(
+                    claim.get("code"), "code", max_length=64
+                ).upper()
+                kind = require_enum(claim.get("kind"), "kind", CASE_KINDS)
+                state = require_enum(
+                    claim.get("state") or "draft",
+                    "state",
+                    ("draft", "reviewed", "deprecated"),
+                )
+                number = claim.get("number")
+                if number is not None and (
+                    isinstance(number, bool)
+                    or not isinstance(number, int)
+                    or number < 0
+                ):
+                    raise QaValidationError("number must be a non-negative integer")
+                conflict = 1 if claim.get("conflict") else 0
+                conn.execute(
+                    "INSERT OR REPLACE INTO case_code_claims"
+                    " (project_id, code, case_id, kind, state, source, number,"
+                    "  conflict, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, 'yaml', ?, ?, ?)",
+                    (
+                        project_id,
+                        code,
+                        case_id,
+                        kind,
+                        state,
+                        number,
+                        conflict,
+                        now,
+                    ),
+                )
+                module = claim.get("module")
+                seq = claim.get("seq")
+                if isinstance(module, str) and module and isinstance(seq, int):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO case_id_claims"
+                        " (project_id, case_id, module, seq, state, source,"
+                        "  updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, 'yaml', ?)",
+                        (project_id, case_id, module, seq, state, now),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM case_id_claims"
+                        " WHERE project_id = ? AND case_id = ? AND source = 'yaml'",
+                        (project_id, case_id),
+                    )
+            conn.execute(
+                "DELETE FROM case_claim_conflicts WHERE project_id = ?",
+                (project_id,),
+            )
+            for conflict in conflict_list:
+                conn.execute(
+                    "INSERT OR REPLACE INTO case_claim_conflicts"
+                    " (project_id, entity, value, case_ids, reason, detected_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        project_id,
+                        require_text(
+                            conflict.get("entity"), "entity", max_length=20
+                        ),
+                        require_text(
+                            conflict.get("value"), "value", max_length=200
+                        ),
+                        dumps(list(conflict.get("case_ids") or [])),
+                        str(conflict.get("reason") or ""),
+                        now,
+                    ),
+                )
+        return {
+            "codes": len(claim_list),
+            "deleted": len(deletes),
+            "conflicts": len(conflict_list),
+        }
+
+    def create_import_batch(
+        self,
+        batch_id: str,
+        project_id: str,
+        *,
+        mode: str,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Record one import batch before its temporary files are written."""
+        self._require_project(project_id)
+        now = utcnow_iso()
+        self._write(
+            "INSERT INTO case_import_batches"
+            " (batch_id, project_id, mode, status, manifest, error,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, 'preparing', ?, '', ?, ?)",
+            (
+                require_text(batch_id, "batch_id", max_length=100),
+                project_id,
+                require_enum(mode, "mode", ("compat", "strict")),
+                dumps(dict(manifest)),
+                now,
+                now,
+            ),
+        )
+        return self.get_import_batch(batch_id)
+
+    def update_import_batch(
+        self, batch_id: str, status: str, *, error: str = ""
+    ) -> dict[str, Any]:
+        """Move one import batch through its journal states."""
+        status_value = require_enum(
+            status,
+            "status",
+            (
+                "preparing",
+                "files_committed",
+                "index_committed",
+                "complete",
+                "aborting",
+                "aborted",
+                "failed",
+            ),
+        )
+        now = utcnow_iso()
+        self._write(
+            "UPDATE case_import_batches SET status = ?, error = ?,"
+            " updated_at = ? WHERE batch_id = ?",
+            (status_value, optional_text(error, "error", max_length=2000) or "", now, batch_id),
+        )
+        return self.get_import_batch(batch_id)
+
+    def get_import_batch(self, batch_id: str) -> dict[str, Any]:
+        """Return one import journal row with its manifest decoded."""
+        row = self._fetchone(
+            "SELECT * FROM case_import_batches WHERE batch_id = ?", (batch_id,)
+        )
+        if row is None:
+            raise QaNotFoundError(f"import batch '{batch_id}' not found")
+        item = _row_to_dict(row)
+        item["manifest"] = loads(item.get("manifest"), {}) or {}
+        return item
+
+    def list_import_batches(
+        self,
+        project_id: str,
+        *,
+        statuses: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the import journal rows of a project, newest first."""
+        self._require_project(project_id)
+        if statuses:
+            wanted = tuple(
+                require_enum(
+                    status,
+                    "status",
+                    (
+                        "preparing",
+                        "files_committed",
+                        "index_committed",
+                        "complete",
+                        "aborting",
+                        "aborted",
+                        "failed",
+                    ),
+                )
+                for status in statuses
+            )
+            placeholders = ", ".join("?" for _ in wanted)
+            rows = self._fetchall(
+                f"SELECT * FROM case_import_batches WHERE project_id = ?"
+                f" AND status IN ({placeholders}) ORDER BY created_at",
+                (project_id, *wanted),
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT * FROM case_import_batches WHERE project_id = ?"
+                " ORDER BY created_at",
+                (project_id,),
+            )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            item["manifest"] = loads(item.get("manifest"), {}) or {}
+            items.append(item)
+        return items
 
     def derived_case_ids(self) -> list[str]:
         """Return every case ID that a YAML document currently owns."""

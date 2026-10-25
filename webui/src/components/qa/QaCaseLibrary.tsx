@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, BadgeCheck, ChevronDown, ChevronRight, Download, Plus, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -65,6 +65,53 @@ const CASE_STATUSES: QaCaseStatus[] = ["draft", "ready", "deprecated"];
 const CASE_EDIT_STATUSES: QaCaseStatus[] = ["draft", "ready"];
 const CASE_RISKS = ["", "high", "medium", "low"] as const;
 const CASE_PAGE_SIZE = 50;
+
+/** Read the case-library query from the hash route (``#/qa?...``). */
+function readQaCaseUrl(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const hash = window.location.hash;
+  if (!hash.startsWith("#/qa")) return {};
+  const query = hash.split("?", 2)[1] ?? "";
+  return Object.fromEntries(new URLSearchParams(query));
+}
+
+/** Write only the case-library keys, preserving tab/chat/section. */
+function writeQaCaseUrl(
+  values: Record<string, string | null>,
+  replace = false,
+): void {
+  if (typeof window === "undefined") return;
+  const hash = window.location.hash;
+  if (!hash.startsWith("#/qa")) return;
+  const [path, query = ""] = hash.split("?", 2);
+  const params = new URLSearchParams(query);
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null || value === "") params.delete(key);
+    else params.set(key, value);
+  }
+  const next = `${path}${params.toString() ? `?${params.toString()}` : ""}`;
+  const url = `${window.location.pathname}${window.location.search}${next}`;
+  if (replace || window.location.hash === next) {
+    window.history.replaceState(window.history.state, "", url);
+  } else {
+    window.history.pushState(window.history.state, "", url);
+  }
+}
+
+function parseCasePage(raw: string | undefined): number {
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value - 1 : 0;
+}
+
+function validCaseKind(raw: string | undefined): QaCaseKind | "all" {
+  return CASE_KINDS.includes(raw as QaCaseKind) ? (raw as QaCaseKind) : "all";
+}
+
+function validCaseStatus(raw: string | undefined): QaCaseStatus | "all" {
+  return CASE_STATUSES.includes(raw as QaCaseStatus)
+    ? (raw as QaCaseStatus)
+    : "all";
+}
 
 /** The case library speaks the trace vocabulary: reviewed, archived. */
 function caseStatusLabel(
@@ -317,16 +364,27 @@ export function QaCaseLibrary({
   initialProjectId = "all",
 }: QaCaseLibraryProps) {
   const tx = useQaCopy();
-  const [projectId, setProjectId] = useState<string>(initialProjectId);
+  const initialUrl = useMemo(() => readQaCaseUrl(), []);
+  const [projectId, setProjectId] = useState<string>(
+    initialUrl.project || initialProjectId,
+  );
   useEffect(() => {
-    setProjectId(initialProjectId);
+    if (!readQaCaseUrl().project) setProjectId(initialProjectId);
   }, [initialProjectId]);
-  const [kind, setKind] = useState<string>("all");
-  const [status, setStatus] = useState<string>("all");
-  const [moduleId, setModuleId] = useState<string>("all");
-  const [operationId, setOperationId] = useState<string>("all");
-  const [page, setPage] = useState(0);
-  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState<string>(
+    validCaseKind(initialUrl.kind),
+  );
+  const [status, setStatus] = useState<string>(
+    validCaseStatus(initialUrl.status),
+  );
+  const [moduleId, setModuleId] = useState<string>(
+    initialUrl.module || "all",
+  );
+  const [operationId, setOperationId] = useState<string>(
+    initialUrl.operation || "all",
+  );
+  const [page, setPage] = useState(() => parseCasePage(initialUrl.page));
+  const [search, setSearch] = useState(initialUrl.q || "");
   const debouncedSearch = useQaDebouncedValue(search, 250);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -334,6 +392,8 @@ export function QaCaseLibrary({
   const [importOpen, setImportOpen] = useState(false);
   const [exportError, setExportError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const syncingFromUrl = useRef(false);
+  const urlMounted = useRef(false);
 
   const facets = useQaQuery(
     () =>
@@ -355,6 +415,70 @@ export function QaCaseLibrary({
   useEffect(() => {
     setPage(0);
   }, [kind, status, moduleId, operationId, debouncedSearch]);
+
+  useEffect(() => {
+    if (kind !== "all" && !CASE_KINDS.includes(kind as QaCaseKind)) {
+      setKind("all");
+    }
+    if (status !== "all" && !CASE_STATUSES.includes(status as QaCaseStatus)) {
+      setStatus("all");
+    }
+  }, [kind, status]);
+
+  useEffect(() => {
+    if (
+      projectId !== "all" &&
+      projects.length > 0 &&
+      !projects.some((project) => project.id === projectId)
+    ) {
+      setProjectId("all");
+    }
+  }, [projectId, projects]);
+
+  useEffect(() => {
+    if (!facets.data) return;
+    if (
+      moduleId !== "all" &&
+      !facets.data.modules.some((module) => module.id === moduleId)
+    ) {
+      setModuleId("all");
+    }
+    if (
+      operationId !== "all" &&
+      !facets.data.operations.some((operation) => operation.id === operationId)
+    ) {
+      setOperationId("all");
+    }
+  }, [facets.data, moduleId, operationId]);
+
+  useEffect(() => {
+    const applyFromUrl = () => {
+      if (
+        typeof window === "undefined" ||
+        !window.location.hash.startsWith("#/qa")
+      ) {
+        return;
+      }
+      const raw = readQaCaseUrl();
+      syncingFromUrl.current = true;
+      setProjectId(raw.project || initialProjectId);
+      setKind(validCaseKind(raw.kind));
+      setStatus(validCaseStatus(raw.status));
+      setModuleId(raw.module || "all");
+      setOperationId(raw.operation || "all");
+      setPage(parseCasePage(raw.page));
+      setSearch(raw.q || "");
+      queueMicrotask(() => {
+        syncingFromUrl.current = false;
+      });
+    };
+    window.addEventListener("popstate", applyFromUrl);
+    window.addEventListener("hashchange", applyFromUrl);
+    return () => {
+      window.removeEventListener("popstate", applyFromUrl);
+      window.removeEventListener("hashchange", applyFromUrl);
+    };
+  }, [initialProjectId]);
 
   const cases = useQaQuery(
     () =>
@@ -386,6 +510,32 @@ export function QaCaseLibrary({
   useEffect(() => {
     if (page >= pageCount) setPage(pageCount - 1);
   }, [page, pageCount]);
+
+  useEffect(() => {
+    if (syncingFromUrl.current) return;
+    const replace = !urlMounted.current;
+    urlMounted.current = true;
+    writeQaCaseUrl(
+      {
+        project: projectId === "all" ? null : projectId,
+        kind: kind === "all" ? null : kind,
+        status: status === "all" ? null : status,
+        module: moduleId === "all" ? null : moduleId,
+        operation: operationId === "all" ? null : operationId,
+        q: debouncedSearch.trim() || null,
+        page: page > 0 ? String(page + 1) : null,
+      },
+      replace,
+    );
+  }, [
+    projectId,
+    kind,
+    status,
+    moduleId,
+    operationId,
+    debouncedSearch,
+    page,
+  ]);
 
   const items = cases.data?.items ?? [];
   const selectedCase = items.find((item) => item.id === selectedId) ?? null;

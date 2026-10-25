@@ -504,7 +504,9 @@ class QaApi:
         if path == "/api/qa/cases/import":
             project_id = _require_field(payload, "project_id")
             result = self._cases().import_cases(
-                project_id, payload.get("payload", payload.get("cases"))
+                project_id,
+                payload.get("payload", payload.get("cases")),
+                mode=str(payload.get("mode") or "compat"),
             )
             return _ok(result)
         if path == "/api/qa/scripts/create":

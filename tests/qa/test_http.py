@@ -106,6 +106,37 @@ async def test_create_project_and_case_through_mutations(
     assert response.status_code == 404
 
 
+async def test_import_mode_is_forwarded_through_the_websocket_route(
+    store: QaStore, project: dict
+) -> None:
+    api = QaApi(store)
+    request = make_request(
+        "/api/qa/cases/import",
+        {
+            "project_id": project["id"],
+            "mode": "strict",
+            "payload": {
+                "cases": [
+                    {"title": "valid", "kind": "api"},
+                    {"title": "", "kind": "api"},
+                ]
+            },
+        },
+    )
+    response = await _dispatch(api, request, "/api/qa/cases/import")
+    payload = _body(response)
+    assert payload["mode"] == "strict"
+    assert payload["committed"] is False
+    assert payload["created"] == []
+    assert len(payload["errors"]) == 1
+    listing = _body(
+        await _dispatch(
+            api, make_request(f"/api/qa/cases?project_id={project['id']}")
+        )
+    )
+    assert listing["total"] == 0
+
+
 async def test_validation_errors_are_json(store: QaStore) -> None:
     api = QaApi(store)
     request = make_request("/api/qa/projects/create", {"key": "1bad", "name": "x"})

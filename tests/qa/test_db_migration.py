@@ -71,6 +71,109 @@ def test_version_2_database_upgrades_in_place(tmp_path: Path) -> None:
     } <= tables
 
 
+def _strip_version_six_tables(path: Path) -> None:
+    """Turn a current database back into the version-5 shape."""
+    with sqlite3.connect(path) as conn:
+        for table in (
+            "case_code_claims",
+            "case_id_claims",
+            "case_claim_conflicts",
+            "case_import_batches",
+        ):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("PRAGMA user_version=5")
+        conn.commit()
+
+
+def test_version_5_database_backfills_the_allocation_ledger(tmp_path: Path) -> None:
+    path = tmp_path / "qa.sqlite3"
+    original = QaStore(path)
+    project = original.create_project(key="shop", name="Shop")
+    first = original.create_case(project["id"], title="first", kind="api")
+    second = original.create_case(project["id"], title="second", kind="api")
+    # Two YAML rows sharing a code used to be accepted by the table; the v6
+    # migration must record the conflict instead of failing the unique index.
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE cases SET id = ?, code = ?, derived = 1, yaml_path = ?"
+            " WHERE id = ?",
+            ("TC-SHOP-001", "SHOP-API-001", "cases/TC-SHOP-001.yaml", first["id"]),
+        )
+        conn.execute(
+            "UPDATE cases SET id = ?, code = ?, derived = 1, yaml_path = ?"
+            " WHERE id = ?",
+            ("TC-SHOP-002", "SHOP-API-001", "cases/TC-SHOP-002.yaml", second["id"]),
+        )
+        conn.commit()
+    original.close()
+    _strip_version_six_tables(path)
+
+    for _ in range(2):
+        upgraded = QaStore(path)
+        try:
+            assert SCHEMA_VERSION == 6
+            claims = upgraded.list_case_claims(project["id"])
+            assert len(claims) == 2
+            assert sum(1 for claim in claims if claim["conflict"]) == 1
+            conflicts = upgraded.list_case_claim_conflicts(project["id"])
+            assert any(item["entity"] == "code" for item in conflicts)
+            assert upgraded.list_case_id_claims(project["id"])
+        finally:
+            upgraded.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        indexes = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+    assert {
+        "idx_case_code_claims_yaml",
+        "idx_case_code_claims_case",
+        "idx_case_id_claims_seq",
+    } <= indexes
+
+
+def test_version_5_database_keeps_legacy_and_yaml_rows_with_the_same_code(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "qa.sqlite3"
+    original = QaStore(path)
+    project = original.create_project(key="shop", name="Shop")
+    legacy = original.create_case(
+        project["id"], title="legacy", kind="api", code="SHOP-API-001"
+    )
+    yaml_case = original.create_case(
+        project["id"], title="yaml", kind="api", code="SHOP-API-002"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE cases SET derived = 1, yaml_path = ? WHERE id = ?",
+            ("cases/TC-SHOP-001.yaml", yaml_case["id"]),
+        )
+        conn.execute(
+            "UPDATE cases SET code = ? WHERE id = ?",
+            ("SHOP-API-001", yaml_case["id"]),
+        )
+        conn.commit()
+    original.close()
+    _strip_version_six_tables(path)
+
+    upgraded = QaStore(path)
+    try:
+        claims = upgraded.list_case_claims(project["id"])
+        assert {claim["source"] for claim in claims} == {"legacy", "yaml"}
+        assert len([claim for claim in claims if claim["code"] == "SHOP-API-001"]) == 2
+        assert not [
+            item
+            for item in upgraded.list_case_claim_conflicts(project["id"])
+            if item["entity"] == "code"
+        ]
+        assert legacy["id"] != yaml_case["id"]
+    finally:
+        upgraded.close()
+
+
 def test_version_4_database_gains_the_trace_index_and_keeps_its_rows(
     tmp_path: Path,
 ) -> None:

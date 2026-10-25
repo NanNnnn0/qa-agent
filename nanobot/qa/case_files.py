@@ -32,12 +32,16 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sqlite3
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISREG
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
@@ -74,7 +78,6 @@ from qa_trace.caseyaml import (
     draft_batches,
     iter_case_documents,
     legacy_kind,
-    next_case_id,
     read_case_document,
     write_case_document,
 )
@@ -95,6 +98,7 @@ from qa_trace.loader import (
     Project,
     ProjectConfig,
     load_project,
+    load_project_from_documents,
     load_yaml_document,
 )
 from qa_trace.models import Case, Source, TestPoint
@@ -510,6 +514,11 @@ class CaseFiles:
         self.store = store
         self._root = Path(root) if root is not None else None
         self._indexed: set[str] = set()
+        self._claim_sync_signature: dict[str, tuple[Any, ...]] = {}
+        self._claim_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        self._claim_sync_report: dict[str, dict[str, Any]] = {}
+        self._claim_conflicts_cache: dict[str, tuple[Any, ...]] = {}
+        self._recovered_projects: set[str] = set()
 
     # -- project layout ----------------------------------------------------
 
@@ -797,6 +806,7 @@ class CaseFiles:
         row = self._row(case_id)
         project = self.store.get_project(row["project_id"])
         directory = self.project_dir(project)
+        self._ensure_recovered(row["project_id"])
         document = self._document(row, directory)
         context = (
             self._case_reference_context(directory, document)
@@ -920,6 +930,10 @@ class CaseFiles:
                 offset=offset,
             )
         self._ensure_indexed([project_id] if project_id else self._all_project_ids())
+        for target_project_id in (
+            [project_id] if project_id else self._all_project_ids()
+        ):
+            self._ensure_recovered(target_project_id)
         try:
             result = self.store.list_case_summaries(
                 project_id=project_id,
@@ -1110,6 +1124,378 @@ class CaseFiles:
 
     # -- code and ID allocation -------------------------------------------
 
+    @staticmethod
+    def _claim_number(
+        code: str, project_key: str, kind: str
+    ) -> int | None:
+        prefix = f"{project_key.upper()}-{kind.upper()}-"
+        if not code.startswith(prefix):
+            return None
+        suffix = code[len(prefix):]
+        return int(suffix) if suffix.isdigit() else None
+
+    @staticmethod
+    def _claim_id_parts(case_id: str) -> tuple[str, int | None]:
+        try:
+            parsed = parse_id(case_id)
+        except IdError:
+            return "", None
+        if (
+            parsed.kind is not IdKind.CASE
+            or parsed.is_uuid
+            or not parsed.seq.isdigit()
+        ):
+            return "", None
+        return parsed.module or "", int(parsed.seq)
+
+    def _claim_from_row(
+        self,
+        project: Mapping[str, Any],
+        row: Mapping[str, Any],
+        *,
+        id_parts: tuple[str, int | None] | None = None,
+    ) -> dict[str, Any]:
+        case_id = str(row["id"])
+        code = str(row.get("code") or case_id).strip().upper()
+        kind = str(row.get("kind") or "api")
+        status = str(row.get("status") or "draft")
+        state = (
+            "reviewed"
+            if status == "ready"
+            else "deprecated"
+            if status == "deprecated"
+            else "draft"
+        )
+        module, seq = (
+            id_parts if id_parts is not None else self._claim_id_parts(case_id)
+        )
+        return {
+            "case_id": case_id,
+            "code": code,
+            "kind": kind,
+            "state": state,
+            "source": "yaml",
+            "number": self._claim_number(code, str(project["key"]), kind),
+            "module": module,
+            "seq": seq,
+            "conflict": 0,
+        }
+
+    def _claim_from_record(
+        self, project: Mapping[str, Any], record: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        document = record["document"]
+        case_id = str(record["entity_id"])
+        raw_code = document.get("code")
+        code = (
+            raw_code.strip().upper()
+            if isinstance(raw_code, str) and raw_code.strip()
+            else case_id
+        )
+        kind = kind_for_type(
+            document.get("type")
+            if isinstance(document.get("type"), str)
+            else None
+        )
+        module, seq = self._claim_id_parts(case_id)
+        return {
+            "case_id": case_id,
+            "code": code,
+            "kind": kind,
+            "state": _document_review_status(document),
+            "source": "yaml",
+            "number": self._claim_number(code, str(project["key"]), kind),
+            "module": module,
+            "seq": seq,
+            "conflict": 0,
+        }
+
+    @staticmethod
+    def _relative_path_fast(path: Path, directory: Path) -> str:
+        """Return a project-relative path without resolving every file."""
+        try:
+            return path.relative_to(directory).as_posix()
+        except ValueError:
+            return case_relative_path(path, directory)
+
+    def _case_dirs_signature(self, directory: Path) -> tuple[Any, ...]:
+        """Return a cheap fingerprint of the directories that can add cases."""
+        parts: list[tuple[str, int]] = []
+        for name in ("cases", TOMBSTONES_DIRNAME, "draft"):
+            path = directory / name
+            try:
+                parts.append((name, path.stat().st_mtime_ns))
+            except OSError:
+                parts.append((name, 0))
+        for batch in draft_batches(directory):
+            path = directory / "draft" / batch
+            try:
+                parts.append((f"draft/{batch}", path.stat().st_mtime_ns))
+            except OSError:
+                continue
+        return tuple(sorted(parts))
+
+    def sync_case_claims(self, project_id: str) -> dict[str, Any]:
+        """Synchronise the allocation ledger with the case files on disk.
+
+        Unchanged files are read from the derived rows; only new or modified
+        files are parsed.  The directory signature avoids re-listing 10,000
+        files on every write, while the per-file mtime still catches a hand
+        edit inside an existing batch.
+        """
+        project = self.store.get_project(project_id)
+        directory = self.project_dir(project)
+        empty = {
+            "project_id": project_id,
+            "scanned": 0,
+            "parsed": 0,
+            "codes": 0,
+            "conflicts": 0,
+        }
+        if not directory.is_dir():
+            return empty
+        states = {
+            str(state["path"]): state
+            for state in self.store.list_trace_file_states(project_id)
+            if state.get("entity_type") == "case"
+        }
+        signature = self._case_dirs_signature(directory)
+        list_paths = self._claim_sync_signature.get(project_id) != signature
+        cached = self._claim_cache.get(project_id)
+        previous = cached
+        if previous is None:
+            previous = {
+                str(claim["case_id"]): claim
+                for claim in self.store.list_case_claims(project_id)
+                if claim.get("source") == "yaml"
+            }
+            for claim in self.store.list_case_id_claims(project_id):
+                case_id = str(claim["case_id"])
+                if case_id in previous and claim.get("source") == "yaml":
+                    previous[case_id]["module"] = claim.get("module")
+                    previous[case_id]["seq"] = claim.get("seq")
+        if cached is not None and not list_paths:
+            unchanged_all = True
+            for relative, state in states.items():
+                try:
+                    st = os.stat(directory / relative)
+                except OSError:
+                    unchanged_all = False
+                    break
+                if (
+                    not S_ISREG(st.st_mode)
+                    or st.st_mtime_ns != int(state.get("mtime_ns") or 0)
+                ):
+                    unchanged_all = False
+                    break
+            if unchanged_all:
+                report = self._claim_sync_report.get(project_id)
+                if report is not None:
+                    return report
+        rows_by_id = {
+            str(row["id"]): row
+            for row in self.store.case_claim_rows(project_id)
+        }
+        claims: dict[str, dict[str, Any]] = {}
+        parsed: dict[str, dict[str, Any]] = {}
+        seen: set[str] = set()
+        conflicts: list[dict[str, Any]] = []
+
+        def add(record: Mapping[str, Any]) -> None:
+            claim = self._claim_from_record(project, record)
+            case_id = claim["case_id"]
+            relative = str(record["relative"])
+            existing = claims.get(case_id)
+            if existing is not None and existing.get("path") != relative:
+                conflicts.append(
+                    {
+                        "entity": "id",
+                        "value": case_id,
+                        "case_ids": [case_id],
+                        "reason": (
+                            f"id declared by both {existing.get('path')}"
+                            f" and {relative}"
+                        ),
+                    }
+                )
+                return
+            claim["path"] = relative
+            claims[case_id] = claim
+            seen.add(case_id)
+            parsed[relative] = dict(record)
+
+        for relative, state in states.items():
+            path = directory / relative
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if not S_ISREG(st.st_mode):
+                continue
+            case_id = str(state["entity_id"])
+            seen.add(case_id)
+            unchanged = st.st_mtime_ns == int(state.get("mtime_ns") or 0)
+            if unchanged:
+                row = rows_by_id.get(case_id)
+                if row is not None:
+                    prior = previous.get(case_id)
+                    claims[case_id] = self._claim_from_row(
+                        project,
+                        row,
+                        id_parts=(
+                            (
+                                str(prior.get("module") or ""),
+                                prior.get("seq"),
+                            )
+                            if prior is not None
+                            else None
+                        ),
+                    )
+                    claims[case_id]["path"] = relative
+                    continue
+            record = _load_document_record(path, directory, "case")
+            if record is not None:
+                add(record)
+
+        if list_paths:
+            for path, _batch in case_file_paths(
+                directory, include_drafts=True, include_tombstones=True
+            ):
+                relative = self._relative_path_fast(path, directory)
+                if relative in parsed:
+                    continue
+                state = states.get(relative)
+                if state is not None:
+                    try:
+                        unchanged = path.stat().st_mtime_ns == int(
+                            state.get("mtime_ns") or 0
+                        )
+                    except OSError:
+                        continue
+                    if unchanged and str(state["entity_id"]) in claims:
+                        continue
+                record = _load_document_record(path, directory, "case")
+                if record is not None:
+                    add(record)
+                else:
+                    seen.add(path.stem)
+
+        by_code: dict[str, list[dict[str, Any]]] = {}
+        for claim in claims.values():
+            by_code.setdefault(str(claim["code"]), []).append(claim)
+        for code, group in by_code.items():
+            if len(group) < 2:
+                continue
+            ids = sorted(str(item["case_id"]) for item in group)
+            for item in group:
+                item["conflict"] = 1 if str(item["case_id"]) != ids[0] else 0
+            conflicts.append(
+                {
+                    "entity": "code",
+                    "value": code,
+                    "case_ids": ids,
+                    "reason": "duplicate yaml case code",
+                }
+            )
+
+        for record in parsed.values():
+            if record["path"].stem != record["entity_id"]:
+                conflicts.append(
+                    {
+                        "entity": "path",
+                        "value": str(record["relative"]),
+                        "case_ids": [str(record["entity_id"])],
+                        "reason": "file name does not match declared id",
+                    }
+                )
+
+        def key(claim: Mapping[str, Any]) -> tuple[Any, ...]:
+            return (
+                str(claim.get("code") or "").upper(),
+                str(claim.get("kind") or ""),
+                str(claim.get("state") or ""),
+                claim.get("number"),
+                int(claim.get("conflict") or 0),
+                str(claim.get("module") or ""),
+                claim.get("seq"),
+            )
+
+        upserts = [
+            claim
+            for case_id, claim in claims.items()
+            if key(claim) != key(previous.get(case_id, {}))
+        ]
+        deletes = [
+            case_id
+            for case_id, claim in previous.items()
+            if case_id not in claims
+            and str(claim.get("state") or "") != "reserved"
+        ]
+        conflict_signature = tuple(
+            sorted(
+                (
+                    str(item["entity"]),
+                    str(item["value"]),
+                    tuple(str(case_id) for case_id in item["case_ids"]),
+                    str(item["reason"]),
+                )
+                for item in conflicts
+            )
+        )
+        changed = bool(upserts or deletes) or (
+            self._claim_conflicts_cache.get(project_id) != conflict_signature
+        )
+        if changed:
+            result = self.store.apply_case_claim_changes(
+                project_id,
+                upserts,
+                delete_case_ids=deletes,
+                conflicts=conflicts,
+            )
+        else:
+            result = {
+                "codes": 0,
+                "deleted": 0,
+                "conflicts": len(conflicts),
+            }
+        for record in parsed.values():
+            self._upsert_file_state(project_id, record)
+        self._claim_sync_signature[project_id] = signature
+        self._claim_cache[project_id] = {
+            str(claim["case_id"]): claim for claim in claims.values()
+        }
+        self._claim_conflicts_cache[project_id] = conflict_signature
+        report = {
+            "project_id": project_id,
+            "scanned": len(seen),
+            "parsed": len(parsed),
+            "codes": len(claims),
+            "conflicts": len(conflicts),
+            "changed": result["codes"] + result["deleted"],
+        }
+        self._claim_sync_report[project_id] = report
+        return report
+
+    def _remember_case_claim(
+        self,
+        project_id: str,
+        project: Mapping[str, Any],
+        directory: Path,
+        row: Mapping[str, Any],
+    ) -> None:
+        """Keep the in-process claim cache warm after one confirmed write."""
+        cache = self._claim_cache.get(project_id)
+        if cache is None:
+            return
+        claim = self._claim_from_row(project, row)
+        cache[str(row["id"])] = claim
+        self._claim_sync_signature[project_id] = self._case_dirs_signature(
+            directory
+        )
+        report = self._claim_sync_report.get(project_id)
+        if report is not None:
+            report["codes"] = len(cache)
+
     def _known_codes(self, project: Mapping[str, Any], directory: Path) -> set[str]:
         codes = self.store.case_codes(project["id"])
         for _, _, document in iter_case_documents(
@@ -1196,6 +1582,7 @@ class CaseFiles:
         """Create a case as a draft file, then refresh the derived index."""
         project = self.store.get_project(project_id)
         directory = self.ensure_project(project)
+        self._ensure_recovered(project_id)
         case_kind = require_enum(kind, "kind", CASE_KINDS, default="api")
         case_title = require_text(title, "title", max_length=300)
         legacy_status = require_enum(status, "status", CASE_STATUSES, default="draft")
@@ -1211,37 +1598,59 @@ class CaseFiles:
         tag_values = normalize_tags(tags)
         testpoint_values = _as_id_list(testpoints, field="testpoints")
         source_values = _as_id_list(sources, field="sources")
-        case_code = self._resolve_code(project, directory, case_kind, code)
-        case_id = next_case_id(
-            directory, project_key=str(project["key"]), taken=self._taken_case_ids()
+        self.sync_case_claims(project_id)
+        requested_code: str | None = None
+        if code is not None and not (isinstance(code, str) and not code.strip()):
+            if not isinstance(code, str):
+                raise QaValidationError("code must be a string")
+            requested_code = code.strip().upper()
+            if not CASE_CODE_RE.match(requested_code):
+                raise QaValidationError(
+                    "code must start with a letter and use uppercase letters, "
+                    "digits, '_' or '-'"
+                )
+        allocation = self.store.allocate_case_identity(
+            project_id,
+            kind=case_kind,
+            module=case_module(str(project["key"])),
+            code=requested_code,
+        )[0]
+        case_id = str(allocation["case_id"])
+        case_code = str(allocation["code"])
+        try:
+            document = self._build_document(
+                case_id=case_id,
+                code=case_code,
+                title=case_title,
+                priority=priority_value,
+                case_type=derive_case_type(case_kind),
+                status=trace_status,
+                steps=normalized_steps
+                or self._derived_steps(case_kind, api_spec, expected_text, case_title),
+                automation=automation_block(self._automation_status(case_kind, api_spec)),
+                testpoints=testpoint_values,
+                sources=source_values,
+                direct_reason=direct_reason,
+                risk=risk,
+                preconditions=optional_text(preconditions, "preconditions", max_length=5000),
+                postconditions=postconditions,
+                expected=expected_text,
+                api=api_spec or None,
+                owner=owner or author or None,
+                tags=tag_values,
+                note=note,
+                extra={"source": source} if source else None,
+            )
+            self._check_promotable(
+                directory, document, trace_status, testpoint_values, source_values
+            )
+            target = self._write_document(directory, document, batch=batch)
+        except BaseException:
+            self.store.release_case_claims(project_id, [case_id])
+            raise
+        self.store.confirm_case_claims(
+            project_id, [case_id], state=trace_status
         )
-        document = self._build_document(
-            case_id=case_id,
-            code=case_code,
-            title=case_title,
-            priority=priority_value,
-            case_type=derive_case_type(case_kind),
-            status=trace_status,
-            steps=normalized_steps
-            or self._derived_steps(case_kind, api_spec, expected_text, case_title),
-            automation=automation_block(self._automation_status(case_kind, api_spec)),
-            testpoints=testpoint_values,
-            sources=source_values,
-            direct_reason=direct_reason,
-            risk=risk,
-            preconditions=optional_text(preconditions, "preconditions", max_length=5000),
-            postconditions=postconditions,
-            expected=expected_text,
-            api=api_spec or None,
-            owner=owner or author or None,
-            tags=tag_values,
-            note=note,
-            extra={"source": source} if source else None,
-        )
-        self._check_promotable(
-            directory, document, trace_status, testpoint_values, source_values
-        )
-        target = self._write_document(directory, document, batch=batch)
         if not incremental_enabled():
             self.reindex(project_id=project_id)
             if trace_status == "reviewed" and (testpoint_values or source_values):
@@ -1258,6 +1667,7 @@ class CaseFiles:
         record = _file_state_record(target, directory, "case", case_id, document)
         derived_row = self._derived_row(project, record)
         stored_row = self.store.upsert_derived_case(derived_row)
+        self._remember_case_claim(project_id, project, directory, stored_row)
         if trace_status == "reviewed" and (testpoint_values or source_values):
             self._record_review(
                 project,
@@ -1279,6 +1689,7 @@ class CaseFiles:
         row = self._row(case_id)
         project = self.store.get_project(row["project_id"])
         directory = self.ensure_project(project)
+        self._ensure_recovered(row["project_id"])
         path = self._document_path(row, directory)
         if path is None or not path.is_file():
             raise QaNotFoundError(f"case '{case_id}' has no YAML document")
@@ -1333,54 +1744,105 @@ class CaseFiles:
         risk = fields.get("risk", document.get("risk"))
         note = fields.get("note", document.get("note"))
         owner = fields.get("owner", document.get("owner"))
-        code = self._resolve_code(
-            project,
-            directory,
-            kind,
-            fields.get("code", document.get("code")),
-            current=str(row.get("code") or "") or None,
-        )
+        self.sync_case_claims(row["project_id"])
+        current_code = str(row.get("code") or "").strip().upper()
+        raw_code = fields.get("code", document.get("code"))
+        if raw_code is None or (isinstance(raw_code, str) and not raw_code.strip()):
+            code = current_code
+        else:
+            if not isinstance(raw_code, str):
+                raise QaValidationError("code must be a string")
+            code = raw_code.strip().upper()
+            if not CASE_CODE_RE.match(code):
+                raise QaValidationError(
+                    "code must start with a letter and use uppercase letters, "
+                    "digits, '_' or '-'"
+                )
+        if not code:
+            allocation = self.store.allocate_case_identity(
+                row["project_id"],
+                kind=kind,
+                module=case_module(str(project["key"])),
+            )[0]
+            code = str(allocation["code"])
+        claim_changed = code != current_code
+        if claim_changed:
+            self.store.replace_case_code_claim(
+                row["project_id"], case_id, code, kind
+            )
         extra = {
             key: value
             for key, value in document.items()
             if key not in KNOWN_CASE_KEYS and key != "tombstone"
         }
-        updated = self._build_document(
-            case_id=case_id,
-            code=code,
-            title=title if isinstance(title, str) else "",
-            priority=priority,
-            case_type=derive_case_type(kind),
-            status=trace_status,
-            steps=steps
-            or self._derived_steps(
-                kind, api_spec, str(expected or ""), str(title or "")
-            ),
-            automation=self._merge_automation(document, kind, api_spec),
-            testpoints=testpoints,
-            sources=sources,
-            direct_reason=direct_reason if isinstance(direct_reason, str) else None,
-            risk=risk if isinstance(risk, str) else None,
-            preconditions=preconditions if isinstance(preconditions, str) else None,
-            postconditions=postconditions if isinstance(postconditions, str) else None,
-            expected=expected if isinstance(expected, str) else None,
-            api=api_spec or None,
-            data=document.get("data") if isinstance(document.get("data"), Mapping) else None,
-            owner=owner if isinstance(owner, str) else None,
-            tags=tags,
-            note=note if isinstance(note, str) else None,
-            legacy_id=(
-                document.get("legacy_id")
-                if isinstance(document.get("legacy_id"), str)
-                else None
-            ),
-            extra=extra,
+        try:
+            updated = self._build_document(
+                case_id=case_id,
+                code=code,
+                title=title if isinstance(title, str) else "",
+                priority=priority,
+                case_type=derive_case_type(kind),
+                status=trace_status,
+                steps=steps
+                or self._derived_steps(
+                    kind, api_spec, str(expected or ""), str(title or "")
+                ),
+                automation=self._merge_automation(document, kind, api_spec),
+                testpoints=testpoints,
+                sources=sources,
+                direct_reason=direct_reason if isinstance(direct_reason, str) else None,
+                risk=risk if isinstance(risk, str) else None,
+                preconditions=preconditions if isinstance(preconditions, str) else None,
+                postconditions=postconditions if isinstance(postconditions, str) else None,
+                expected=expected if isinstance(expected, str) else None,
+                api=api_spec or None,
+                data=document.get("data") if isinstance(document.get("data"), Mapping) else None,
+                owner=owner if isinstance(owner, str) else None,
+                tags=tags,
+                note=note if isinstance(note, str) else None,
+                legacy_id=(
+                    document.get("legacy_id")
+                    if isinstance(document.get("legacy_id"), str)
+                    else None
+                ),
+                extra=extra,
+            )
+            relative = case_relative_path(path, directory)
+            batch = relative.split("/")[1] if relative.startswith("draft/") else None
+            has_links = bool(testpoints or sources)
+            self._check_promotable(
+                directory, updated, trace_status, testpoints, sources
+            )
+            placement = trace_status
+            if trace_status == "reviewed" and not has_links:
+                placement = "draft"
+            target = case_path_for(
+                directory, case_id, status=placement, batch=batch
+            )
+            if target != path and target.exists():
+                raise QaConflictError(
+                    "case file already exists:"
+                    f" {case_relative_path(target, directory)}"
+                )
+            target = self._write_document(
+                directory, updated, batch=batch, overwrite=True
+            )
+        except BaseException:
+            if claim_changed and current_code:
+                try:
+                    self.store.replace_case_code_claim(
+                        row["project_id"], case_id, current_code, kind
+                    )
+                except QaError:  # pragma: no cover - best-effort compensation
+                    logger.warning(
+                        "qa cases: could not restore code {} for {}",
+                        current_code,
+                        case_id,
+                    )
+            raise
+        self.store.confirm_case_claims(
+            row["project_id"], [case_id], state=trace_status
         )
-        relative = case_relative_path(path, directory)
-        batch = relative.split("/")[1] if relative.startswith("draft/") else None
-        has_links = bool(testpoints or sources)
-        self._check_promotable(directory, updated, trace_status, testpoints, sources)
-        target = self._write_document(directory, updated, batch=batch)
         if target != path:
             path.unlink(missing_ok=True)
         if not incremental_enabled():
@@ -1401,6 +1863,9 @@ class CaseFiles:
         record = _file_state_record(target, directory, "case", case_id, updated)
         derived_row = self._derived_row(project, record)
         stored_row = self.store.upsert_derived_case(derived_row)
+        self._remember_case_claim(
+            row["project_id"], project, directory, stored_row
+        )
         if trace_status == "reviewed" and has_links:
             reviewer = fields.get("reviewer")
             note_value = fields.get("note")
@@ -1426,6 +1891,7 @@ class CaseFiles:
         row = self._row(case_id)
         project = self.store.get_project(row["project_id"])
         directory = self.ensure_project(project)
+        self._ensure_recovered(row["project_id"])
         path = self._document_path(row, directory)
         if path is None or not path.is_file():
             raise QaNotFoundError(f"case '{case_id}' has no YAML document")
@@ -1440,6 +1906,19 @@ class CaseFiles:
         tombstone = directory / TOMBSTONES_DIRNAME / f"{case_id}.yaml"
         write_case_document(tombstone, document)
         path.unlink(missing_ok=True)
+        self.store.confirm_case_claims(
+            row["project_id"], [case_id], state="deprecated"
+        )
+        cache = self._claim_cache.get(row["project_id"])
+        if cache is not None:
+            claim = dict(
+                cache.get(case_id) or self._claim_from_row(project, row)
+            )
+            claim["state"] = "deprecated"
+            cache[case_id] = claim
+            self._claim_sync_signature[row["project_id"]] = (
+                self._case_dirs_signature(directory)
+            )
         if not incremental_enabled():
             self.reindex(project_id=row["project_id"])
             return {
@@ -1456,15 +1935,251 @@ class CaseFiles:
             "tombstone": case_relative_path(tombstone, directory),
         }
 
-    def import_cases(self, project_id: str, payload: Any) -> dict[str, Any]:
-        """Import a JSON case array as draft cases in one SQLite transaction.
+    def _ensure_recovered(self, project_id: str) -> None:
+        """Reconcile import journals left by a previous process."""
+        if project_id in self._recovered_projects:
+            return
+        self._recovered_projects.add(project_id)
+        try:
+            batches = self.store.list_import_batches(
+                project_id,
+                statuses=(
+                    "preparing",
+                    "files_committed",
+                    "aborting",
+                    "index_committed",
+                ),
+            )
+        except QaError:
+            return
+        for batch in batches:
+            try:
+                self._recover_import_batch(batch)
+            except Exception:  # pragma: no cover - recovery must not break reads
+                logger.exception(
+                    "qa cases: could not recover import batch {}", batch["batch_id"]
+                )
 
-        All items are validated and the YAML files are written before the single
-        ``apply_case_batch`` transaction.  Any unexpected write or transaction
-        failure removes the files written by this call, so YAML and SQLite roll
-        back together.  Duplicate codes are skipped, which keeps re-import
-        idempotent.
+    def _manifest_matches(
+        self, path: Path, directory: Path, expected_hash: str
+    ) -> bool:
+        if not path.is_file():
+            return False
+        record = _load_document_record(path, directory, "case")
+        return (
+            record is not None
+            and str(record["content_hash"]) == str(expected_hash)
+        )
+
+    def _recover_import_batch(self, batch: Mapping[str, Any]) -> None:
+        """Drive one journal row to ``complete`` or ``aborted``."""
+        batch_id = str(batch["batch_id"])
+        project = self.store.get_project(str(batch["project_id"]))
+        directory = self.project_dir(project)
+        status = str(batch.get("status") or "")
+        files = list((batch.get("manifest") or {}).get("files") or [])
+        if status == "index_committed":
+            self.store.update_import_batch(batch_id, "complete")
+            return
+        if status in {"preparing", "aborting"}:
+            for entry in files:
+                target = directory / str(entry.get("target") or "")
+                temp = directory / str(entry.get("temp") or "")
+                if str(entry.get("target")):
+                    if self._manifest_matches(
+                        target, directory, str(entry.get("content_hash") or "")
+                    ):
+                        target.unlink(missing_ok=True)
+                if str(entry.get("temp")):
+                    temp.unlink(missing_ok=True)
+            self.store.release_case_claims(
+                str(batch["project_id"]),
+                [str(entry.get("case_id") or "") for entry in files],
+            )
+            self.store.update_import_batch(batch_id, "aborted")
+            return
+        if status != "files_committed":
+            return
+        if not all(
+            self._manifest_matches(
+                directory / str(entry.get("target") or ""),
+                directory,
+                str(entry.get("content_hash") or ""),
+            )
+            for entry in files
+        ):
+            # A missing or user-edited target means we cannot safely roll
+            # forward or delete the batch; leave the files and record failure.
+            self.store.update_import_batch(
+                batch_id,
+                "failed",
+                error="batch files no longer match the manifest",
+            )
+            return
+        entries: list[dict[str, Any]] = []
+        for entry in files:
+            target = directory / str(entry["target"])
+            record = _load_document_record(target, directory, "case")
+            if record is None:
+                self.store.update_import_batch(
+                    batch_id, "failed", error="batch file cannot be read"
+                )
+                return
+            entries.append(
+                {
+                    "case_id": str(entry["case_id"]),
+                    "code": str(entry.get("code") or ""),
+                    "document": record["document"],
+                    "target": target,
+                    "relative": str(entry["target"]),
+                }
+            )
+        rows, summaries, state_files, edges, claims = self._prepare_case_batch(
+            project, directory, entries
+        )
+        self.store.apply_case_claim_changes(str(batch["project_id"]), claims)
+        if rows:
+            self.store.apply_case_batch(
+                str(batch["project_id"]),
+                rows,
+                summaries=summaries,
+                files=state_files,
+                edges=edges,
+            )
+        self.store.update_import_batch(batch_id, "index_committed")
+        self.store.update_import_batch(batch_id, "complete")
+        self._claim_cache.pop(str(batch["project_id"]), None)
+        self._claim_sync_signature.pop(str(batch["project_id"]), None)
+
+    def _prepare_case_batch(
+        self,
+        project: Mapping[str, Any],
+        directory: Path,
+        entries: Sequence[Mapping[str, Any]],
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[tuple[str, str, str, str]],
+        list[dict[str, Any]],
+    ]:
+        """Build the derived rows, summaries, edges and claims of a batch."""
+        project_record = _load_document_record(
+            directory / PROJECT_FILE, directory, "project"
+        )
+        rows: list[dict[str, Any]] = []
+        summaries: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+        edges: list[tuple[str, str, str, str]] = []
+        claims: list[dict[str, Any]] = []
+        if project_record is not None:
+            files.append(self._file_state_payload(project_record))
+        for entry in entries:
+            record = _file_state_record(
+                entry["target"],
+                directory,
+                "case",
+                entry["case_id"],
+                entry["document"],
+            )
+            row = self._derived_row(project, record)
+            context = self._case_reference_context(
+                directory, entry["document"]
+            )
+            testpoint_records = [
+                formal
+                for records in context["testpoint_records"].values()
+                if (
+                    formal := next(
+                        (
+                            candidate
+                            for candidate in records
+                            if candidate["batch"] is None
+                        ),
+                        None,
+                    )
+                )
+                is not None
+            ]
+            source_records = [
+                formal
+                for records in context["source_records"].values()
+                if (
+                    formal := next(
+                        (
+                            candidate
+                            for candidate in records
+                            if candidate["batch"] is None
+                        ),
+                        None,
+                    )
+                )
+                is not None
+            ]
+            recheck, library_ok = self._target_recheck(
+                directory,
+                entry["document"],
+                testpoint_records,
+                source_records,
+            )
+            entities = {("case", entry["case_id"]): record}
+            entities.update(context["entities"])
+            summary = self._case_summary_row(
+                project,
+                record,
+                entities=entities,
+                formal_entities=context["formal_entities"],
+                recheck=recheck,
+                library_ok=library_ok,
+            )
+            entry["row"] = row
+            entry["summary"] = summary
+            rows.append(row)
+            summaries.append(summary)
+            files.append(self._file_state_payload(record))
+            claim = self._claim_from_record(project, record)
+            claim["state"] = _document_review_status(entry["document"])
+            claims.append(claim)
+            for records in (
+                *context["testpoint_records"].values(),
+                *context["source_records"].values(),
+            ):
+                for candidate in records:
+                    files.append(self._file_state_payload(candidate))
+            for to_type, to_id in _declared_edges(
+                entry["document"], "case"
+            ):
+                edges.append(("case", entry["case_id"], to_type, to_id))
+            for testpoint_id, records in context[
+                "testpoint_records"
+            ].items():
+                if not records:
+                    continue
+                for to_type, to_id in _declared_edges(
+                    records[-1]["document"], "testpoint"
+                ):
+                    edges.append(
+                        ("testpoint", testpoint_id, to_type, to_id)
+                    )
+        files = list({item["path"]: item for item in files}.values())
+        return rows, summaries, files, edges, claims
+
+    def import_cases(
+        self,
+        project_id: str,
+        payload: Any,
+        *,
+        mode: str = "compat",
+    ) -> dict[str, Any]:
+        """Import cases in ``compat`` (partial) or ``strict`` (all-or-none) mode.
+
+        Both modes validate before writing.  Strict mode returns ``committed:
+        False`` and leaves the project untouched when any item fails validation.
+        Files are staged under ``.qa-import/<batch>/`` and committed with
+        ``os.replace``; a journal row lets the next request reconcile a crash
+        between the file commit and the index transaction.
         """
+        mode_value = require_enum(mode, "mode", ("compat", "strict"))
         raw_cases: Any = payload
         if isinstance(payload, Mapping):
             raw_cases = payload.get("cases", [])
@@ -1474,30 +2189,14 @@ class CaseFiles:
             return self._import_cases_legacy(project_id, raw_cases)
         project = self.store.get_project(project_id)
         directory = self.ensure_project(project)
-        project_key = str(project["key"]).upper()
         module = case_module(str(project["key"]))
-        # The derived index already holds every indexed code; scanning all YAML
-        # here would make a 1,000-row import scale with the whole library.
+        self._ensure_recovered(project_id)
         self._ensure_indexed([project_id])
-        existing_codes = self.store.case_codes(project_id)
-        taken_ids = set(self._taken_case_ids())
-        for path, _batch in case_file_paths(
-            directory, include_drafts=True, include_tombstones=True
-        ):
-            taken_ids.add(path.stem)
-        highest = 0
-        for case_id in taken_ids:
-            try:
-                parsed = parse_id(case_id)
-            except IdError:
-                continue
-            if (
-                parsed.kind is IdKind.CASE
-                and parsed.module == module
-                and parsed.seq.isdigit()
-            ):
-                highest = max(highest, int(parsed.seq))
-
+        self.sync_case_claims(project_id)
+        existing_codes = {
+            str(claim["code"]).upper()
+            for claim in self.store.list_case_claims(project_id)
+        }
         prepared: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
@@ -1505,6 +2204,7 @@ class CaseFiles:
             if not isinstance(item, Mapping):
                 errors.append({"index": index, "error": "case must be an object"})
                 continue
+            allocation: dict[str, Any] | None = None
             try:
                 title = require_text(
                     item.get("title", ""), "title", max_length=300
@@ -1529,27 +2229,21 @@ class CaseFiles:
                         "a new case cannot start as deprecated; use the delete action to archive one"
                     )
                 trace_status = status_for_legacy(legacy_status)
-
                 raw_code = item.get("code")
                 if raw_code is not None and not isinstance(raw_code, str):
                     raise QaValidationError("code must be a string")
+                requested_code: str | None = None
                 if isinstance(raw_code, str) and raw_code.strip():
-                    code = raw_code.strip().upper()
-                    if not CASE_CODE_RE.match(code):
+                    requested_code = raw_code.strip().upper()
+                    if not CASE_CODE_RE.match(requested_code):
                         raise QaValidationError(
                             "code must start with a letter and use uppercase letters, "
                             "digits, '_' or '-'"
                         )
-                    if code in existing_codes:
-                        skipped.append({
-                            "index": index,
-                            "code": code,
-                            "reason": "code already exists",
-                        })
-                        continue
-                else:
-                    code = self._next_code(project_key, existing_codes, kind)
-
+                    if requested_code in existing_codes:
+                        raise QaConflictError(
+                            f"case code '{requested_code}' already exists in this project"
+                        )
                 steps = validate_steps(item.get("steps"))
                 api_spec = validate_api_spec(item.get("api"))
                 expected = optional_text(
@@ -1570,14 +2264,14 @@ class CaseFiles:
                 sources = _as_id_list(item.get("sources"), field="sources")
                 direct_reason = item.get("direct_reason")
                 risk = item.get("risk")
-
-                highest += 1
-                case_id = f"TC-{module}-{highest:03d}"
-                while case_id in taken_ids:
-                    highest += 1
-                    case_id = f"TC-{module}-{highest:03d}"
-                taken_ids.add(case_id)
-
+                allocation = self.store.allocate_case_identity(
+                    project_id,
+                    kind=kind,
+                    module=module,
+                    code=requested_code,
+                )[0]
+                case_id = str(allocation["case_id"])
+                code = str(allocation["code"])
                 document = self._build_document(
                     case_id=case_id,
                     code=code,
@@ -1613,131 +2307,106 @@ class CaseFiles:
                     directory, case_id, status=placement, batch=None
                 )
                 relative = case_relative_path(target, directory)
-                prepared.append({
-                    "index": index,
-                    "case_id": case_id,
-                    "code": code,
-                    "document": document,
-                    "target": target,
-                    "relative": relative,
-                })
+                prepared.append(
+                    {
+                        "index": index,
+                        "case_id": case_id,
+                        "code": code,
+                        "kind": kind,
+                        "document": document,
+                        "target": target,
+                        "relative": relative,
+                    }
+                )
                 existing_codes.add(code)
             except QaConflictError as exc:
-                skipped.append({
-                    "index": index,
-                    "code": item.get("code"),
-                    "reason": str(exc),
-                })
+                if allocation is not None:
+                    self.store.release_case_claims(
+                        project_id, [str(allocation["case_id"])]
+                    )
+                if mode_value == "strict":
+                    errors.append({"index": index, "error": str(exc)})
+                else:
+                    skipped.append(
+                        {
+                            "index": index,
+                            "code": item.get("code"),
+                            "reason": str(exc),
+                        }
+                    )
             except QaError as exc:
+                if allocation is not None:
+                    self.store.release_case_claims(
+                        project_id, [str(allocation["case_id"])]
+                    )
                 errors.append({"index": index, "error": str(exc)})
 
+        if mode_value == "strict" and (errors or skipped):
+            self.store.release_case_claims(
+                project_id, [entry["case_id"] for entry in prepared]
+            )
+            return {
+                "project": {"id": project_id, "key": project["key"]},
+                "mode": mode_value,
+                "committed": False,
+                "created": [],
+                "skipped": skipped,
+                "errors": errors,
+            }
+        if not prepared:
+            return {
+                "project": {"id": project_id, "key": project["key"]},
+                "mode": mode_value,
+                "committed": True,
+                "created": [],
+                "skipped": skipped,
+                "errors": errors,
+            }
+
+        batch_id = uuid4().hex
+        staging = directory / ".qa-import" / batch_id
+        manifest_files: list[dict[str, Any]] = []
+        for entry in prepared:
+            temp = staging / f"{entry['case_id']}.yaml"
+            manifest_files.append(
+                {
+                    "case_id": entry["case_id"],
+                    "code": entry["code"],
+                    "target": entry["relative"],
+                    "temp": self._relative_path_fast(temp, directory),
+                    "content_hash": sha256_text(
+                        canonical_json(entry["document"])
+                    ),
+                }
+            )
+        self.store.create_import_batch(
+            batch_id,
+            project_id,
+            mode=mode_value,
+            manifest={"files": manifest_files},
+        )
         written: list[Path] = []
         try:
+            staging.mkdir(parents=True, exist_ok=True)
+            for entry in prepared:
+                temp = staging / f"{entry['case_id']}.yaml"
+                write_case_document(temp, entry["document"])
+                entry["temp"] = temp
             for entry in prepared:
                 target = entry["target"]
                 if target.exists():
                     raise QaConflictError(
                         f"case file already exists: {entry['relative']}"
                     )
-                write_case_document(target, entry["document"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(entry["temp"], target)
                 written.append(target)
-
-            project_record = _load_document_record(
-                directory / PROJECT_FILE, directory, "project"
+                entry["written"] = True
+            self.store.update_import_batch(batch_id, "files_committed")
+            rows, summaries, files, edges, batch_claims = (
+                self._prepare_case_batch(project, directory, prepared)
             )
-            rows: list[dict[str, Any]] = []
-            summaries: list[dict[str, Any]] = []
-            files: list[dict[str, Any]] = []
-            edges: list[tuple[str, str, str, str]] = []
-            if project_record is not None:
-                files.append(self._file_state_payload(project_record))
-            for entry in prepared:
-                record = _file_state_record(
-                    entry["target"],
-                    directory,
-                    "case",
-                    entry["case_id"],
-                    entry["document"],
-                )
-                row = self._derived_row(project, record)
-                context = self._case_reference_context(
-                    directory, entry["document"]
-                )
-                testpoint_records = [
-                    formal
-                    for records in context["testpoint_records"].values()
-                    if (
-                        formal := next(
-                            (
-                                candidate
-                                for candidate in records
-                                if candidate["batch"] is None
-                            ),
-                            None,
-                        )
-                    )
-                    is not None
-                ]
-                source_records = [
-                    formal
-                    for records in context["source_records"].values()
-                    if (
-                        formal := next(
-                            (
-                                candidate
-                                for candidate in records
-                                if candidate["batch"] is None
-                            ),
-                            None,
-                        )
-                    )
-                    is not None
-                ]
-                recheck, library_ok = self._target_recheck(
-                    directory,
-                    entry["document"],
-                    testpoint_records,
-                    source_records,
-                )
-                entities = {("case", entry["case_id"]): record}
-                entities.update(context["entities"])
-                summary = self._case_summary_row(
-                    project,
-                    record,
-                    entities=entities,
-                    formal_entities=context["formal_entities"],
-                    recheck=recheck,
-                    library_ok=library_ok,
-                )
-                entry["row"] = row
-                entry["summary"] = summary
-                rows.append(row)
-                summaries.append(summary)
-                files.append(self._file_state_payload(record))
-                for records in (
-                    *context["testpoint_records"].values(),
-                    *context["source_records"].values(),
-                ):
-                    for candidate in records:
-                        files.append(self._file_state_payload(candidate))
-                for to_type, to_id in _declared_edges(
-                    entry["document"], "case"
-                ):
-                    edges.append(
-                        ("case", entry["case_id"], to_type, to_id)
-                    )
-                for testpoint_id, records in context[
-                    "testpoint_records"
-                ].items():
-                    if not records:
-                        continue
-                    for to_type, to_id in _declared_edges(
-                        records[-1]["document"], "testpoint"
-                    ):
-                        edges.append(
-                            ("testpoint", testpoint_id, to_type, to_id)
-                        )
-            files = list({item["path"]: item for item in files}.values())
+            self.store.apply_case_claim_changes(project_id, batch_claims)
             if rows:
                 self.store.apply_case_batch(
                     project_id,
@@ -1746,10 +2415,35 @@ class CaseFiles:
                     files=files,
                     edges=edges,
                 )
-        except BaseException:
-            for path in written:
-                path.unlink(missing_ok=True)
+            self.store.update_import_batch(batch_id, "index_committed")
+            self.store.update_import_batch(batch_id, "complete")
+        except BaseException as exc:
+            try:
+                self.store.update_import_batch(
+                    batch_id, "aborting", error=str(exc)
+                )
+            except QaError:  # pragma: no cover - journal best effort
+                pass
+            for entry in prepared:
+                temp = entry.get("temp")
+                if isinstance(temp, Path):
+                    temp.unlink(missing_ok=True)
+                if entry.get("written"):
+                    entry["target"].unlink(missing_ok=True)
+            self.store.apply_case_claim_changes(
+                project_id,
+                [],
+                delete_case_ids=[entry["case_id"] for entry in prepared],
+            )
+            try:
+                self.store.update_import_batch(
+                    batch_id, "aborted", error=str(exc)
+                )
+            except QaError:  # pragma: no cover - journal best effort
+                pass
+            shutil.rmtree(staging, ignore_errors=True)
             raise
+        shutil.rmtree(staging, ignore_errors=True)
 
         created: list[dict[str, Any]] = []
         for entry in prepared:
@@ -1777,6 +2471,9 @@ class CaseFiles:
             created.append(payload)
         return {
             "project": {"id": project_id, "key": project["key"]},
+            "mode": mode_value,
+            "committed": True,
+            "batch_id": batch_id,
             "created": created,
             "skipped": skipped,
             "errors": errors,
@@ -1837,6 +2534,53 @@ class CaseFiles:
 
     # -- index maintenance -------------------------------------------------
 
+    def _claims_for_scanned(
+        self,
+        project: Mapping[str, Any],
+        scanned: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Build the v6 allocation claims from one project scan."""
+        claims: dict[str, dict[str, Any]] = {}
+        conflicts: list[dict[str, Any]] = []
+        for item in scanned:
+            if item["entity_type"] != "case":
+                continue
+            claim = self._claim_from_record(project, item)
+            claim["path"] = str(item["relative"])
+            existing = claims.get(str(claim["case_id"]))
+            if existing is not None and existing.get("path") != claim["path"]:
+                conflicts.append(
+                    {
+                        "entity": "id",
+                        "value": str(claim["case_id"]),
+                        "case_ids": [str(claim["case_id"])],
+                        "reason": (
+                            f"id declared by both {existing.get('path')}"
+                            f" and {claim['path']}"
+                        ),
+                    }
+                )
+                continue
+            claims[str(claim["case_id"])] = claim
+        by_code: dict[str, list[dict[str, Any]]] = {}
+        for claim in claims.values():
+            by_code.setdefault(str(claim["code"]), []).append(claim)
+        for code, group in by_code.items():
+            if len(group) < 2:
+                continue
+            ids = sorted(str(item["case_id"]) for item in group)
+            for item in group:
+                item["conflict"] = 1 if str(item["case_id"]) != ids[0] else 0
+            conflicts.append(
+                {
+                    "entity": "code",
+                    "value": code,
+                    "case_ids": ids,
+                    "reason": "duplicate yaml case code",
+                }
+            )
+        return list(claims.values()), conflicts
+
     def reindex(
         self,
         *,
@@ -1877,23 +2621,48 @@ class CaseFiles:
         }
         for project in projects:
             directory = self.project_dir(project)
+            self._ensure_recovered(str(project["id"]))
+            parse_started = time.perf_counter()
             scanned = _scan_project_documents(directory)
+            parse_seconds = time.perf_counter() - parse_started
             rows = self._derived_rows(project, directory, scanned)
-            written = self.store.replace_derived_cases(project["id"], rows)
+            claims, conflicts = self._claims_for_scanned(project, scanned)
             if trace:
                 edges, summaries, files = self._trace_index_rows(
                     project, directory, scanned
                 )
-                trace_stats = self.store.replace_trace_index(
-                    project["id"], edges=edges, summaries=summaries, files=files
+                index_stats = self.store.replace_project_index(
+                    project["id"],
+                    rows,
+                    edges=edges,
+                    summaries=summaries,
+                    files=files,
                 )
+                written = index_stats["cases"]
+                trace_stats = {
+                    "edges": index_stats["edges"],
+                    "summaries": index_stats["summaries"],
+                    "files": index_stats["files"],
+                }
             else:
+                written = self.store.replace_derived_cases(project["id"], rows)
                 trace_stats = {"edges": 0, "summaries": 0, "files": 0}
+            self.store.sync_case_claims(
+                project["id"],
+                claims,
+                seen_case_ids=[str(claim["case_id"]) for claim in claims],
+                conflicts=conflicts,
+            )
+            self._claim_cache.pop(project["id"], None)
+            self._claim_sync_signature.pop(project["id"], None)
+            self._claim_conflicts_cache.pop(project["id"], None)
+            self._claim_sync_report.pop(project["id"], None)
             report["projects"].append({
                 "id": project["id"],
                 "key": project["key"],
                 "root": directory.as_posix(),
                 "cases": written,
+                "parse_seconds": round(parse_seconds, 4),
                 "trace": trace_stats,
                 "trace_rebuilt": trace,
             })
@@ -2333,12 +3102,28 @@ class CaseFiles:
                     (item["entity_type"], item["entity_id"], to_type, to_id)
                 )
 
-        library: Project | None = None
-        try:
-            library = load_project(directory)
-        except QaTraceError as exc:
+        formal_documents: list[
+            tuple[str, Path, Mapping[str, Any]]
+        ] = []
+        for item in scanned:
+            if item["entity_type"] == "project":
+                formal_documents.append(
+                    ("project", item["path"], item["document"])
+                )
+            elif (
+                item["entity_type"] in {"source", "testpoint", "case"}
+                and item["batch"] is None
+                and not str(item["relative"]).startswith("tombstones/")
+            ):
+                formal_documents.append(
+                    (item["entity_type"], item["path"], item["document"])
+                )
+        outcome = load_project_from_documents(directory, formal_documents)
+        library = outcome.project if outcome.ok else None
+        if library is None and outcome.errors:
             logger.debug(
-                "qa cases: trace index rebuild without a valid library: {}", exc.format()
+                "qa cases: trace index rebuild without a valid library: {}",
+                outcome.errors[0].format(),
             )
         rechecks: Mapping[str, Any] = {}
         if library is not None:
@@ -2747,6 +3532,7 @@ class CaseFiles:
         *,
         batch: str | None,
         formal: bool | None = None,
+        overwrite: bool = False,
     ) -> Path:
         """Write a case document where its review state belongs.
 
@@ -2763,6 +3549,10 @@ class CaseFiles:
             placement = "draft"
         case_id = str(document.get("id"))
         target = case_path_for(directory, case_id, status=placement, batch=batch)
+        if target.exists() and not overwrite:
+            raise QaConflictError(
+                f"case file already exists: {case_relative_path(target, directory)}"
+            )
         write_case_document(target, document)
         return target
 

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -318,6 +318,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.location.hash = "";
 });
 
 describe("QA workbench", () => {
@@ -729,6 +730,56 @@ describe("QA workbench", () => {
       ).toBe(true);
     });
     expect(screen.getByTestId("qa-case-pagination")).toHaveTextContent("第 2 / 2 页");
+  });
+
+  it("restores case filters from the URL and corrects an out-of-range page", async () => {
+    window.location.hash =
+      "#/qa?tab=cases&project=proj-1&kind=api&q=login&page=99";
+    try {
+      renderWorkbench();
+      await screen.findByTestId("qa-case-search");
+      expect(screen.getByTestId("qa-case-search")).toHaveValue("login");
+      await waitFor(() => {
+        expect(window.location.hash).not.toContain("page=99");
+      });
+      expect(window.location.hash).toContain("q=login");
+      expect(window.location.hash).toContain("project=proj-1");
+    } finally {
+      window.location.hash = "";
+    }
+  });
+
+  it("restores filters from the URL on popstate", async () => {
+    window.location.hash = "#/qa?tab=cases";
+    try {
+      renderWorkbench();
+      await screen.findByTestId("qa-case-search");
+      await act(async () => {
+        window.location.hash = "#/qa?tab=cases&kind=ui&q=other";
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("qa-case-search")).toHaveValue("other");
+      });
+      expect(window.location.hash).toContain("kind=ui");
+    } finally {
+      window.location.hash = "";
+    }
+  });
+
+  it("writes a debounced search to the URL", async () => {
+    const user = userEvent.setup();
+    window.location.hash = "#/qa?tab=cases";
+    try {
+      renderWorkbench();
+      const search = await screen.findByTestId("qa-case-search");
+      await user.type(search, "checkout");
+      await waitFor(() => {
+        expect(window.location.hash).toContain("q=checkout");
+      });
+    } finally {
+      window.location.hash = "";
+    }
   });
 
   it("defaults the workbench scope to the chat's bound QA project", async () => {

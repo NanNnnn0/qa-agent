@@ -132,7 +132,7 @@
 - 批量导入通过 SQLite trigger 注入失败时，case 行和本次写入的 YAML 文件都回滚。
 - 重复导入不产生重复 case；带 testpoint 的重复导入不产生重复关系。
 
-## 4. 已知限制与后续
+## 4. 上一轮已知限制与后续（第二轮已修复，见第 9、10 节）
 
 1. **详情仍走完整项目加载（本次未修复）**：`get_case()` 为保持完整契约，仍会 `load_project()`；10,000 条项目实测约 52 秒。下一步应改为“目标 YAML + summary + 定向上游实体”的详情路径，或加项目图缓存。
 2. **FTS5 未实施**：当前搜索是 SQLite `LIKE`，保留兼容回退；标题/code 的 FTS5 可在后续增加。
@@ -290,4 +290,9 @@ DROP TABLE IF EXISTS trace_file_state;
 ## 9. 第二轮修复方案
 
 第 1～6 项后续修复（详情定向读取、编号索引分配、重建单次解析、导入模式与恢复、搜索、URL 状态）的方案见
-[`qa-case-storage-scaling-remediation.md`](./qa-case-storage-scaling-remediation.md)。本轮只给方案，未改代码。
+[`qa-case-storage-scaling-remediation.md`](./qa-case-storage-scaling-remediation.md)。
+
+## 10. 第二轮实施与验收
+
+六项修复已实施（详情定向读取、编号台账分配、重建单次解析、导入模式与恢复、搜索索引、URL 状态）。
+验收记录见 [`qa-case-storage-scaling-acceptance.md`](./qa-case-storage-scaling-acceptance.md)。

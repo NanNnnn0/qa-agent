@@ -18,7 +18,7 @@ the checklist rules live in :mod:`qa_trace.rules`, the metrics in
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -188,13 +188,8 @@ def _validate_thresholds(thresholds: Mapping[str, Any], *, path: Path) -> dict[s
     return resolved
 
 
-def _load_config(root: Path) -> ProjectConfig:
-    path = root / PROJECT_FILE
-    if not path.is_file():
-        raise ProjectError(f"{PROJECT_FILE} is required in a project directory", path=path)
-    data = _load_yaml_file(path)
-    if not isinstance(data, Mapping):
-        raise SchemaError("the file root must be a mapping", path=path)
+def _config_from_mapping(data: Mapping[str, Any], path: Path) -> ProjectConfig:
+    """Validate an already-parsed ``project.yaml`` mapping."""
     schema_version = validate_schema_version(data.get("schema_version"), path=path)
     project_id = data.get("project_id")
     if project_id is None:
@@ -230,6 +225,16 @@ def _load_config(root: Path) -> ProjectConfig:
         strict=strict,
         extra={key: value for key, value in data.items() if key not in _PROJECT_KEYS},
     )
+
+
+def _load_config(root: Path) -> ProjectConfig:
+    path = root / PROJECT_FILE
+    if not path.is_file():
+        raise ProjectError(f"{PROJECT_FILE} is required in a project directory", path=path)
+    data = _load_yaml_file(path)
+    if not isinstance(data, Mapping):
+        raise SchemaError("the file root must be a mapping", path=path)
+    return _config_from_mapping(data, path)
 
 
 def _check_file_name(path: Path, entity_id: str) -> None:
@@ -365,6 +370,93 @@ def scan_project(root: str | Path) -> ScanOutcome:
             testpoints=scan.testpoints,
             cases=scan.cases,
             files=scan.files,
+        ),
+    )
+
+
+def load_project_from_documents(
+    root: str | Path,
+    documents: Iterable[tuple[str, Path, Mapping[str, Any]]],
+) -> ScanOutcome:
+    """Build a :class:`Project` from YAML mappings that are already parsed.
+
+    ``documents`` carries ``(entity_type, path, document)`` where entity_type is
+    ``project``, ``source``, ``testpoint`` or ``case``.  It must contain the
+    formal library only (no drafts or tombstones); the caller has already read
+    the files, so this function never touches the filesystem.  Validation is the
+    same one :func:`load_project` applies: model construction, file-name/ID
+    agreement and duplicate-ID detection.
+    """
+    project_root = Path(root)
+    errors: list[QaTraceError] = []
+    project_document: Mapping[str, Any] | None = None
+    grouped: dict[str, list[tuple[Path, Mapping[str, Any]]]] = {
+        "source": [],
+        "testpoint": [],
+        "case": [],
+    }
+    for entity_type, path, document in documents:
+        if entity_type == "project":
+            project_document = document
+        elif entity_type in grouped:
+            grouped[entity_type].append((Path(path), document))
+    config: ProjectConfig | None = None
+    if project_document is None:
+        errors.append(
+            ProjectError(
+                f"{PROJECT_FILE} is required in a project directory",
+                path=project_root / PROJECT_FILE,
+            )
+        )
+    else:
+        try:
+            config = _config_from_mapping(
+                project_document, project_root / PROJECT_FILE
+            )
+        except QaTraceError as exc:
+            errors.append(exc)
+    seen: dict[str, Path] = {}
+    files: dict[str, Path] = {}
+    built: dict[str, dict[str, Any]] = {
+        "source": {},
+        "testpoint": {},
+        "case": {},
+    }
+    for entity_type, model in (
+        ("source", Source),
+        ("testpoint", TestPoint),
+        ("case", Case),
+    ):
+        for path, document in grouped[entity_type]:
+            try:
+                if not isinstance(document, Mapping):
+                    raise SchemaError("the file root must be a mapping", path=path)
+                entity = model.from_dict(document, path=path)
+                _check_file_name(path, entity.id)
+                if entity.id in seen:
+                    raise DuplicateIdError(
+                        f"id {entity.id} is already defined in {seen[entity.id]}",
+                        path=path,
+                        field="id",
+                    )
+            except QaTraceError as exc:
+                errors.append(exc)
+                continue
+            seen[entity.id] = path
+            files[entity.id] = path
+            built[entity_type][entity.id] = entity
+    if errors or config is None:
+        return ScanOutcome(root=project_root, config=config, errors=tuple(errors))
+    return ScanOutcome(
+        root=project_root,
+        config=config,
+        project=Project(
+            root=project_root,
+            config=config,
+            sources=built["source"],
+            testpoints=built["testpoint"],
+            cases=built["case"],
+            files=files,
         ),
     )
 

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from nanobot.qa.validation import (
 )
 from qa_trace import run_check
 from qa_trace.caseyaml import write_case_document
+from qa_trace.hashing import canonical_json, sha256_text
 
 API_SPEC: dict[str, Any] = {
     "request": {"method": "GET", "path": "/api/products"},
@@ -624,6 +627,123 @@ def test_create_uses_a_single_upsert_without_reindex(
     assert library.store.get_case(case["id"])["derived"] == 1
 
 
+def test_create_does_not_parse_every_case_document(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("create must not parse every case YAML")
+
+    monkeypatch.setattr("nanobot.qa.case_files.iter_case_documents", fail)
+    monkeypatch.setattr("nanobot.qa.case_files._scan_project_documents", fail)
+    case = library.create_case(
+        shop["id"], title="index allocated", kind="api", api=API_SPEC
+    )
+    assert case["code"] == "SHOP-API-001"
+    assert library.store.list_case_claims(shop["id"])
+
+
+def test_a_manual_yaml_code_blocks_create_before_reindex(
+    library: CaseFiles, shop: dict[str, Any]
+) -> None:
+    directory = library.ensure_project(shop)
+    write_case_document(
+        directory / "draft" / "manual" / "cases" / "TC-SHOP-001.yaml",
+        {
+            "schema_version": 1,
+            "id": "TC-SHOP-001",
+            "code": "SHOP-API-001",
+            "title": "manual case",
+            "priority": "P1",
+            "type": "api",
+            "status": "draft",
+            "steps": [{"action": "GET /manual", "expected": "200"}],
+            "automation": {"status": "todo"},
+        },
+    )
+
+    with pytest.raises(QaConflictError):
+        library.create_case(
+            shop["id"], title="duplicate", kind="api", code="SHOP-API-001"
+        )
+    created = library.create_case(shop["id"], title="next", kind="api")
+    assert created["code"] == "SHOP-API-002"
+    assert created["id"] == "TC-SHOP-002"
+
+
+def test_concurrent_creates_share_one_allocation_ledger(
+    library: CaseFiles, store: QaStore, shop: dict[str, Any]
+) -> None:
+    other_store = QaStore(store.path)
+    other = CaseFiles(other_store, default_trace_root())
+    barrier = threading.Barrier(2)
+
+    def worker(target: CaseFiles) -> list[dict[str, Any]]:
+        barrier.wait(timeout=10)
+        return [
+            target.create_case(
+                shop["id"], title=f"concurrent {index}", kind="api"
+            )
+            for index in range(5)
+        ]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            groups = list(pool.map(worker, (library, other)))
+    finally:
+        other_store.close()
+
+    created = [case for group in groups for case in group]
+    assert len(created) == 10
+    assert len({case["id"] for case in created}) == 10
+    assert len({case["code"] for case in created}) == 10
+
+
+def test_write_document_refuses_to_overwrite_an_existing_file(
+    library: CaseFiles, shop: dict[str, Any]
+) -> None:
+    directory = library.ensure_project(shop)
+    target = directory / "draft" / "workbench" / "cases" / "TC-SHOP-001.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("id: TC-SHOP-001\n", encoding="utf-8")
+
+    with pytest.raises(QaConflictError):
+        library._write_document(
+            directory,
+            {
+                "schema_version": 1,
+                "id": "TC-SHOP-001",
+                "code": "SHOP-API-001",
+                "title": "collision",
+                "priority": "P1",
+                "type": "api",
+                "status": "draft",
+                "steps": [{"action": "GET /x", "expected": "200"}],
+                "automation": {"status": "todo"},
+            },
+            batch=None,
+        )
+    assert target.read_text(encoding="utf-8") == "id: TC-SHOP-001\n"
+
+
+def test_archived_case_keeps_its_code_occupied(
+    library: CaseFiles, shop: dict[str, Any]
+) -> None:
+    created = library.create_case(
+        shop["id"], title="to archive", kind="api", api=API_SPEC
+    )
+    library.delete_case(created["id"])
+    with pytest.raises(QaConflictError):
+        library.create_case(
+            shop["id"],
+            title="reuse",
+            kind="api",
+            code=str(created["code"]),
+        )
+    next_case = library.create_case(shop["id"], title="next", kind="api")
+    assert next_case["code"] != created["code"]
+    assert next_case["id"] != created["id"]
+
+
 def test_update_response_matches_the_detail_payload(
     library: CaseFiles, shop: dict[str, Any]
 ) -> None:
@@ -714,6 +834,63 @@ def test_reindex_picks_up_a_hand_edit(
     assert (
         library.list_cases(project_id=shop["id"])["items"][0]["title"] == "renamed on disk"
     )
+
+
+def test_reindex_does_not_load_the_project(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    library.create_case(
+        shop["id"],
+        title="linked",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("reindex must not parse the project a second time")
+
+    monkeypatch.setattr("nanobot.qa.case_files.load_project", fail)
+    report = library.reindex(project_id=shop["id"])
+    assert report["cases"] == 1
+    assert report["trace_summaries"] == 1
+
+
+def test_reindex_rolls_back_cases_and_trace_together(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    case = library.create_case(
+        shop["id"],
+        title="before",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    before_summary = store.get_case_trace_summary(case["id"])
+    assert before_summary is not None
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_trace_summary BEFORE INSERT ON case_trace_summary"
+            " BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+        )
+        conn.commit()
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            library.reindex(project_id=shop["id"])
+    finally:
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("DROP TRIGGER IF EXISTS fail_trace_summary")
+            conn.commit()
+
+    after = store.get_case_trace_summary(case["id"])
+    assert after is not None
+    assert after["input_hash"] == before_summary["input_hash"]
+    assert store.get_case(case["id"])["title"] == "before"
 
 
 def test_reindex_builds_the_trace_index_and_rebuilds_it_after_a_drop(
@@ -895,6 +1072,202 @@ def test_import_1000_cases_is_batched_and_idempotent(
     assert len(again["skipped"]) == 1000
     assert store.list_cases(project_id=shop["id"])["total"] == 1000
     assert store.trace_index_stats(shop["id"]) == stats
+
+
+def test_import_strict_rejects_the_whole_batch(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    result = library.import_cases(
+        shop["id"],
+        {
+            "cases": [
+                {"title": "valid", "kind": "api", "api": API_SPEC},
+                {"title": "", "kind": "api", "api": API_SPEC},
+            ]
+        },
+        mode="strict",
+    )
+    assert result["mode"] == "strict"
+    assert result["committed"] is False
+    assert result["created"] == []
+    assert len(result["errors"]) == 1
+    assert store.list_cases(project_id=shop["id"])["total"] == 0
+    directory = default_trace_root() / "shop"
+    assert list((directory / "draft").rglob("*.yaml")) == []
+
+
+def test_import_compat_keeps_the_valid_items(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    result = library.import_cases(
+        shop["id"],
+        {
+            "cases": [
+                {"title": "valid", "kind": "api", "api": API_SPEC},
+                {"title": "", "kind": "api", "api": API_SPEC},
+            ]
+        },
+    )
+    assert result["mode"] == "compat"
+    assert result["committed"] is True
+    assert len(result["created"]) == 1
+    assert len(result["errors"]) == 1
+    assert store.list_cases(project_id=shop["id"])["total"] == 1
+
+
+def test_import_strict_duplicate_code_aborts_and_releases_claims(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    result = library.import_cases(
+        shop["id"],
+        {
+            "cases": [
+                {"title": "one", "kind": "api", "code": "SHOP-API-001"},
+                {"title": "two", "kind": "api", "code": "SHOP-API-001"},
+            ]
+        },
+        mode="strict",
+    )
+    assert result["committed"] is False
+    assert result["created"] == []
+    assert store.list_cases(project_id=shop["id"])["total"] == 0
+    assert store.list_case_claims(shop["id"]) == []
+
+
+def test_import_recovery_rolls_forward_files_committed(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    document = library._build_document(
+        case_id="TC-SHOP-001",
+        code="SHOP-API-001",
+        title="recovered",
+        priority="P1",
+        case_type="api",
+        status="draft",
+        steps=[{"action": "GET /recovered", "expected": "200"}],
+        automation={"status": "todo"},
+        extra={"source": "import"},
+    )
+    target = directory / "draft" / "workbench" / "cases" / "TC-SHOP-001.yaml"
+    write_case_document(target, document)
+    content_hash = sha256_text(canonical_json(document))
+    store.create_import_batch(
+        "batch-recover",
+        shop["id"],
+        mode="compat",
+        manifest={
+            "files": [
+                {
+                    "case_id": "TC-SHOP-001",
+                    "code": "SHOP-API-001",
+                    "target": "draft/workbench/cases/TC-SHOP-001.yaml",
+                    "temp": ".qa-import/batch-recover/TC-SHOP-001.yaml",
+                    "content_hash": content_hash,
+                }
+            ]
+        },
+    )
+    store.update_import_batch("batch-recover", "files_committed")
+
+    library._recovered_projects.discard(shop["id"])
+    library._ensure_recovered(shop["id"])
+
+    assert store.get_case("TC-SHOP-001")["title"] == "recovered"
+    assert store.get_import_batch("batch-recover")["status"] == "complete"
+
+
+def test_import_recovery_rolls_back_a_preparing_batch(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    target = directory / "draft" / "workbench" / "cases" / "TC-SHOP-001.yaml"
+    temp = directory / ".qa-import" / "batch-abort" / "TC-SHOP-001.yaml"
+    document = library._build_document(
+        case_id="TC-SHOP-001",
+        code="SHOP-API-001",
+        title="aborted",
+        priority="P1",
+        case_type="api",
+        status="draft",
+        steps=[{"action": "GET /aborted", "expected": "200"}],
+        automation={"status": "todo"},
+        extra={"source": "import"},
+    )
+    write_case_document(target, document)
+    write_case_document(temp, document)
+    content_hash = sha256_text(canonical_json(document))
+    store.create_import_batch(
+        "batch-abort",
+        shop["id"],
+        mode="compat",
+        manifest={
+            "files": [
+                {
+                    "case_id": "TC-SHOP-001",
+                    "code": "SHOP-API-001",
+                    "target": "draft/workbench/cases/TC-SHOP-001.yaml",
+                    "temp": ".qa-import/batch-abort/TC-SHOP-001.yaml",
+                    "content_hash": content_hash,
+                }
+            ]
+        },
+    )
+
+    library._recovered_projects.discard(shop["id"])
+    library._ensure_recovered(shop["id"])
+
+    assert not target.exists()
+    assert not temp.exists()
+    assert store.get_import_batch("batch-abort")["status"] == "aborted"
+    assert store.list_cases(project_id=shop["id"])["total"] == 0
+
+
+def test_import_recovery_does_not_delete_a_user_edited_file(
+    library: CaseFiles, shop: dict[str, Any], store: QaStore
+) -> None:
+    directory = library.ensure_project(shop)
+    target = directory / "draft" / "workbench" / "cases" / "TC-SHOP-001.yaml"
+    document = library._build_document(
+        case_id="TC-SHOP-001",
+        code="SHOP-API-001",
+        title="before edit",
+        priority="P1",
+        case_type="api",
+        status="draft",
+        steps=[{"action": "GET /before", "expected": "200"}],
+        automation={"status": "todo"},
+        extra={"source": "import"},
+    )
+    write_case_document(target, document)
+    content_hash = sha256_text(canonical_json(document))
+    store.create_import_batch(
+        "batch-edited",
+        shop["id"],
+        mode="compat",
+        manifest={
+            "files": [
+                {
+                    "case_id": "TC-SHOP-001",
+                    "code": "SHOP-API-001",
+                    "target": "draft/workbench/cases/TC-SHOP-001.yaml",
+                    "temp": ".qa-import/batch-edited/TC-SHOP-001.yaml",
+                    "content_hash": content_hash,
+                }
+            ]
+        },
+    )
+    store.update_import_batch("batch-edited", "files_committed")
+    target.write_text(
+        target.read_text(encoding="utf-8") + "note: human edit\n",
+        encoding="utf-8",
+    )
+
+    library._recovered_projects.discard(shop["id"])
+    library._ensure_recovered(shop["id"])
+
+    assert target.exists()
+    assert store.get_import_batch("batch-edited")["status"] == "failed"
 
 
 def test_import_rolls_back_yaml_and_sqlite_on_transaction_failure(

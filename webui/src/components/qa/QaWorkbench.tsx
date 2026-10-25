@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, FlaskConical, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,32 @@ const QA_TABS: QaTab[] = [
   "trace",
 ];
 
+function readQaTab(): QaTab | null {
+  if (typeof window === "undefined") return null;
+  const hash = window.location.hash;
+  if (!hash.startsWith("#/qa")) return null;
+  const query = hash.split("?", 2)[1] ?? "";
+  const raw = new URLSearchParams(query).get("tab");
+  return QA_TABS.includes(raw as QaTab) ? (raw as QaTab) : null;
+}
+
+function writeQaTab(tab: QaTab, replace = false): void {
+  if (typeof window === "undefined") return;
+  const hash = window.location.hash;
+  if (!hash.startsWith("#/qa")) return;
+  const [path, query = ""] = hash.split("?", 2);
+  const params = new URLSearchParams(query);
+  if (tab === "overview") params.delete("tab");
+  else params.set("tab", tab);
+  const next = `${path}${params.toString() ? `?${params.toString()}` : ""}`;
+  const url = `${window.location.pathname}${window.location.search}${next}`;
+  if (replace || window.location.hash === next) {
+    window.history.replaceState(window.history.state, "", url);
+  } else {
+    window.history.pushState(window.history.state, "", url);
+  }
+}
+
 /** Visible list polling cadence; tests pass `pollIntervalMs={0}`. */
 export const QA_POLL_INTERVAL_MS = 3_000;
 
@@ -64,11 +90,28 @@ export function QaWorkbench({
   pollIntervalMs = QA_POLL_INTERVAL_MS,
 }: QaWorkbenchProps) {
   const tx = useQaCopy();
-  const [tab, setTab] = useState<QaTab>(initialTab);
+  const [tab, setTab] = useState<QaTab>(() => readQaTab() ?? initialTab);
+  const tabMounted = useRef(false);
   const [scopeProjectId, setScopeProjectId] = useState<string>(initialProjectId);
   useEffect(() => {
     setScopeProjectId(initialProjectId);
   }, [initialProjectId]);
+  useEffect(() => {
+    writeQaTab(tab, !tabMounted.current);
+    tabMounted.current = true;
+  }, [tab]);
+  useEffect(() => {
+    const applyFromUrl = () => {
+      const next = readQaTab();
+      if (next) setTab(next);
+    };
+    window.addEventListener("popstate", applyFromUrl);
+    window.addEventListener("hashchange", applyFromUrl);
+    return () => {
+      window.removeEventListener("popstate", applyFromUrl);
+      window.removeEventListener("hashchange", applyFromUrl);
+    };
+  }, []);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const visible = usePageVisibility();
 

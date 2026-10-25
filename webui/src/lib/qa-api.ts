@@ -405,6 +405,9 @@ export interface QaImportSummary {
   created: number;
   skipped: unknown[];
   errors: unknown[];
+  mode: "compat" | "strict";
+  committed: boolean;
+  batchId?: string;
 }
 
 // -- defensive normalization ---------------------------------------------
@@ -1347,16 +1350,21 @@ export async function importQaCases(
   transport: QaMutationTransport,
   projectId: string,
   cases: unknown[],
+  mode: "compat" | "strict" = "compat",
 ): Promise<QaImportSummary> {
   const payload = await mutation<unknown>(transport, "qa.case.import", {
     project_id: projectId,
     payload: { cases },
+    mode,
   });
   const record = isRecord(payload) ? payload : {};
   return {
     created: integer(record.created),
     skipped: Array.isArray(record.skipped) ? record.skipped : [],
     errors: Array.isArray(record.errors) ? record.errors : [],
+    mode: record.mode === "strict" ? "strict" : "compat",
+    committed: record.committed !== false,
+    batchId: typeof record.batch_id === "string" ? record.batch_id : undefined,
   };
 }
 
