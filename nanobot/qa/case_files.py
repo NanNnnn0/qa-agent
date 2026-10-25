@@ -761,6 +761,29 @@ class CaseFiles:
             raise QaNotFoundError(f"case '{case_id}' is archived")
         return row
 
+    def _case_record(
+        self,
+        row: Mapping[str, Any],
+        document: Mapping[str, Any],
+        directory: Path,
+    ) -> dict[str, Any] | None:
+        """Return the file-state record of the target case, without rescanning."""
+        path = self._document_path(row, directory)
+        if path is None or not path.is_file():
+            return None
+        relative = case_relative_path(path, directory)
+        batch = relative.split("/")[1] if relative.startswith("draft/") else None
+        record = _file_state_record(
+            path,
+            directory,
+            "case",
+            str(row["id"]),
+            document,
+            batch=batch,
+        )
+        record["entity_id"] = str(row["id"])
+        return record
+
     def get_case(self, case_id: str) -> dict[str, Any]:
         """Return one case, in the legacy shape, with its chain badges."""
         try:
@@ -775,14 +798,94 @@ class CaseFiles:
         project = self.store.get_project(row["project_id"])
         directory = self.project_dir(project)
         document = self._document(row, directory)
-        trace = self._trace_for(project)
-        recheck = self._rechecks_for(trace).get(case_id)
-        return self._case_payload(
+        context = (
+            self._case_reference_context(directory, document)
+            if document is not None
+            else {
+                "testpoint_records": {},
+                "source_records": {},
+                "entities": {},
+                "formal_entities": {},
+            }
+        )
+        record = (
+            self._case_record(row, document, directory)
+            if document is not None
+            else None
+        )
+        testpoint_records = [
+            formal
+            for records in context["testpoint_records"].values()
+            if (
+                formal := next(
+                    (
+                        candidate
+                        for candidate in records
+                        if candidate["batch"] is None
+                    ),
+                    None,
+                )
+            )
+            is not None
+        ]
+        source_records = [
+            formal
+            for records in context["source_records"].values()
+            if (
+                formal := next(
+                    (
+                        candidate
+                        for candidate in records
+                        if candidate["batch"] is None
+                    ),
+                    None,
+                )
+            )
+            is not None
+        ]
+        if document is not None:
+            recheck, _library_ok = self._target_recheck(
+                directory, document, testpoint_records, source_records
+            )
+        else:
+            recheck = None
+        current_reasons = list(recheck.reasons) if recheck is not None else []
+        summary = self.store.get_case_trace_summary(case_id)
+        needs_refresh = summary is None or str(summary.get("state") or "") != "fresh"
+        if record is not None:
+            entities = dict(context["entities"])
+            entities[("case", case_id)] = record
+            expected_hash = self._summary_input_hash(
+                record, entities, context["formal_entities"]
+            )
+            needs_refresh = needs_refresh or (
+                expected_hash != str(summary.get("input_hash") or "")
+            )
+        if summary is not None:
+            needs_refresh = needs_refresh or (
+                bool(summary.get("needs_recheck")) != (recheck is not None)
+            ) or (
+                list(summary.get("recheck_reasons") or []) != current_reasons
+            )
+        if needs_refresh and record is not None:
+            self.refresh_trace_for_cases(
+                row["project_id"],
+                [case_id],
+                records={case_id: record},
+            )
+            summary = self.store.get_case_trace_summary(case_id)
+        effective_summary = dict(summary or {})
+        # The detail must show the current review baseline even when the cached
+        # summary row predates it; the refresh above repairs the row.
+        effective_summary["needs_recheck"] = recheck is not None
+        effective_summary["recheck_reasons"] = current_reasons
+        return self._case_payload_for_target(
+            project,
+            directory,
             row,
-            document=document,
-            needs_recheck=recheck is not None,
-            recheck_reasons=list(recheck.reasons) if recheck is not None else (),
-            trace=trace,
+            document or {},
+            effective_summary,
+            context=context,
         )
 
     def list_cases(
@@ -1165,7 +1268,7 @@ class CaseFiles:
             )
         self.refresh_trace_for_cases(project_id, [case_id])
         summary = self.store.get_case_trace_summary(case_id) or {}
-        payload = self._case_payload_for_write(
+        payload = self._case_payload_for_target(
             project, directory, stored_row, document, summary
         )
         payload["path"] = case_relative_path(target, directory)
@@ -1310,7 +1413,7 @@ class CaseFiles:
             )
         self.refresh_trace_for_cases(row["project_id"], [case_id])
         summary = self.store.get_case_trace_summary(case_id) or {}
-        payload = self._case_payload_for_write(
+        payload = self._case_payload_for_target(
             project, directory, stored_row, updated, summary
         )
         payload["path"] = case_relative_path(target, directory)
@@ -1653,7 +1756,7 @@ class CaseFiles:
             entry["row"] = self.store.get_case(entry["case_id"])
             document = entry["document"]
             if document.get("testpoints") or document.get("sources"):
-                payload = self._case_payload_for_write(
+                payload = self._case_payload_for_target(
                     project,
                     directory,
                     entry["row"],
@@ -1949,16 +2052,22 @@ class CaseFiles:
             files={},
         )
 
-    def _case_payload_for_write(
+    def _case_payload_for_target(
         self,
         project: Mapping[str, Any],
         directory: Path,
         row: Mapping[str, Any],
         document: Mapping[str, Any],
         summary: Mapping[str, Any],
+        *,
+        context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build the full response payload for a write without loading the project."""
-        context = self._case_reference_context(directory, document)
+        """Build the full payload from the target case and its direct upstream."""
+        context = (
+            context
+            if context is not None
+            else self._case_reference_context(directory, document)
+        )
         testpoints: dict[str, Any] = {}
         for testpoint_id, records in context["testpoint_records"].items():
             formal = next(
@@ -1985,13 +2094,18 @@ class CaseFiles:
                 continue
         # Test point codes are ordinals over the whole formal library; the
         # trace file state gives those IDs without parsing the YAML files.
-        all_ids = self.store.list_trace_entity_ids(
-            str(project["id"]), "testpoint"
+        # A hand-added file that has not been indexed yet is only listed by
+        # name, so parse just that file when its stem disagrees with the
+        # recorded id (the loader would reject such a file anyway).
+        indexed_ids = set(
+            self.store.list_trace_entity_ids(str(project["id"]), "testpoint")
         )
-        if not all_ids:
-            all_ids = [
-                path.stem for path in _yaml_files(directory / "testpoints")
-            ]
+        all_ids = set(indexed_ids)
+        for path in _yaml_files(directory / "testpoints"):
+            if path.stem in indexed_ids:
+                continue
+            record = _load_document_record(path, directory, "testpoint")
+            all_ids.add(record["entity_id"] if record is not None else path.stem)
         for testpoint_id in all_ids:
             testpoints.setdefault(
                 testpoint_id, SimpleNamespace(id=testpoint_id)
@@ -2004,6 +2118,46 @@ class CaseFiles:
             recheck_reasons=list(summary.get("recheck_reasons") or []),
             trace=trace,
         )
+
+    @staticmethod
+    def _summary_input_hash(
+        item: Mapping[str, Any],
+        entities: Mapping[tuple[str, str], Mapping[str, Any]],
+        formal_entities: Mapping[tuple[str, str], Mapping[str, Any]],
+    ) -> str:
+        """Return the content/dependency fingerprint of one case summary."""
+        document = item["document"]
+        declared_testpoints = _declared_ids(document.get("testpoints"))
+        declared_sources = _declared_ids(document.get("sources"))
+        resolved_testpoints = [
+            testpoint_id
+            for testpoint_id in declared_testpoints
+            if ("testpoint", testpoint_id) in formal_entities
+        ]
+        input_payload: dict[str, Any] = {
+            "version": 1,
+            "case": item["content_hash"],
+            "testpoints": {
+                testpoint_id: entities.get(
+                    ("testpoint", testpoint_id), {}
+                ).get("content_hash")
+                for testpoint_id in declared_testpoints
+            },
+            "sources": {
+                source_id: entities.get(("source", source_id), {}).get(
+                    "content_hash"
+                )
+                for source_id in declared_sources
+            },
+        }
+        for testpoint_id in resolved_testpoints:
+            testpoint = entities[("testpoint", testpoint_id)]
+            for source_id in _declared_ids(testpoint["document"].get("sources")):
+                input_payload["sources"].setdefault(
+                    source_id,
+                    entities.get(("source", source_id), {}).get("content_hash"),
+                )
+        return sha256_text(canonical_json(input_payload))
 
     def _case_summary_row(
         self,
@@ -2045,29 +2199,9 @@ class CaseFiles:
             for source_id in declared_sources
         )
 
-        input_payload: dict[str, Any] = {
-            "version": 1,
-            "case": item["content_hash"],
-            "testpoints": {
-                testpoint_id: entities.get(
-                    ("testpoint", testpoint_id), {}
-                ).get("content_hash")
-                for testpoint_id in declared_testpoints
-            },
-            "sources": {
-                source_id: entities.get(("source", source_id), {}).get(
-                    "content_hash"
-                )
-                for source_id in declared_sources
-            },
-        }
-        for testpoint_id in resolved_testpoints:
-            testpoint = entities[("testpoint", testpoint_id)]
-            for source_id in _declared_ids(testpoint["document"].get("sources")):
-                input_payload["sources"].setdefault(
-                    source_id,
-                    entities.get(("source", source_id), {}).get("content_hash"),
-                )
+        input_hash = self._summary_input_hash(
+            item, entities, formal_entities
+        )
 
         # The list groups by the test point's 模块/页面 breadcrumb; the first
         # segment is the stable module, the full breadcrumb stays in
@@ -2117,7 +2251,7 @@ class CaseFiles:
             "group_name": group_name,
             "api_method": api_method,
             "api_path": api_path,
-            "input_hash": sha256_text(canonical_json(input_payload)),
+            "input_hash": input_hash,
             "checked_at": utcnow_iso(),
             "state": "stale" if missing or not library_ok else "fresh",
         }
@@ -2318,7 +2452,11 @@ class CaseFiles:
         return cases
 
     def refresh_trace_for_cases(
-        self, project_id: str, case_ids: Iterable[str]
+        self,
+        project_id: str,
+        case_ids: Iterable[str],
+        *,
+        records: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Recompute the trace summary and edges of a batch of cases.
 
@@ -2366,8 +2504,13 @@ class CaseFiles:
                 skipped.append(case_id)
                 continue
 
-            records = _entity_candidates(directory, "case", case_id)
-            if not records:
+            provided = records.get(case_id) if records is not None else None
+            case_records = (
+                [dict(provided)]
+                if provided is not None
+                else _entity_candidates(directory, "case", case_id)
+            )
+            if not case_records:
                 relative = str(row.get("yaml_path") or "")
                 path = directory / relative if relative else None
                 record = (
@@ -2376,17 +2519,17 @@ class CaseFiles:
                     else None
                 )
                 if record is not None:
-                    records = [record]
-            if not records:
+                    case_records = [record]
+            if not case_records:
                 self.store.replace_trace_edges(project_id, "case", case_id, [])
                 self._delete_entity_file_states(project_id, "case", case_id)
                 self.store.mark_case_trace_stale([case_id])
                 missing.append(case_id)
                 continue
 
-            record = dict(records[-1])
+            record = dict(case_records[-1])
             record["entity_id"] = case_id
-            for candidate in records:
+            for candidate in case_records:
                 self._upsert_file_state(project_id, candidate)
             document = record["document"]
             self.store.replace_trace_edges(

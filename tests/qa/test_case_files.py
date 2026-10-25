@@ -405,6 +405,79 @@ def test_get_carries_the_legacy_shape_and_the_trace_badges(
         library.get_case("TC-SHOP-999")
 
 
+def test_get_case_does_not_load_the_project(
+    library: CaseFiles, shop: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    created = library.create_case(
+        shop["id"],
+        title="linked detail",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("get_case must not load the whole trace project")
+
+    monkeypatch.setattr("nanobot.qa.case_files.load_project", fail)
+    monkeypatch.setattr(library, "_rechecks_for", fail)
+    detail = library.get_case(created["id"])
+    assert detail["testpoints"] == ["TP-SHOP-001"]
+    assert detail["trace_testpoints"][0]["id"] == "TP-SHOP-001"
+    assert detail["trace_sources"][0]["id"] == "REQ-SHOP-01"
+
+
+def test_get_case_refreshes_only_the_target_summary(
+    library: CaseFiles,
+    store: QaStore,
+    shop: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = library.ensure_project(shop)
+    _write_trace_link(directory)
+    first = library.create_case(
+        shop["id"],
+        title="first",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    second = library.create_case(
+        shop["id"],
+        title="second",
+        kind="api",
+        api=API_SPEC,
+        testpoints=["TP-SHOP-001"],
+    )
+    before = {
+        case["id"]: store.get_case_trace_summary(case["id"])
+        for case in (first, second)
+    }
+    path = directory / first["yaml_path"]
+    path.write_text(
+        path.read_text(encoding="utf-8") + "note: changed\n", encoding="utf-8"
+    )
+
+    calls: list[list[str]] = []
+    original = library.refresh_trace_for_cases
+
+    def wrapper(project_id: str, case_ids: Any, **kwargs: Any) -> Any:
+        calls.append(list(case_ids))
+        return original(project_id, case_ids, **kwargs)
+
+    monkeypatch.setattr(library, "refresh_trace_for_cases", wrapper)
+    library.get_case(first["id"])
+
+    assert calls == [[first["id"]]]
+    after = store.get_case_trace_summary(second["id"])
+    assert after is not None
+    assert before[second["id"]] is not None
+    assert after["input_hash"] == before[second["id"]]["input_hash"]
+    assert after["checked_at"] == before[second["id"]]["checked_at"]
+
+
 # -- updating --------------------------------------------------------------
 
 
