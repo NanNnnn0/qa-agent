@@ -169,6 +169,12 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: "happy-dom",
       globals: true,
+      // Integration tests mount the whole shell; the cold module graph and
+      // the lazy settings/thread chunks push a single flow past the 5s
+      // default. Keep a generous ceiling rather than trimming assertions
+      // that describe real user journeys.
+      testTimeout: 20_000,
+      hookTimeout: 20_000,
       setupFiles: ["./src/tests/setup.ts"],
       include: [
         "src/**/*.{test,spec}.{ts,tsx}",

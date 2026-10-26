@@ -36,9 +36,11 @@ export function DispatchHomeExtras({
   const prompt = t("dispatch.checklistPrompt");
   return (
     <div className="flex w-full max-w-[40rem] flex-col items-center gap-5">
-      <h2 className="select-none text-[32px] font-normal leading-tight tracking-normal text-foreground">
-        {t("dispatch.homeTitle")}
-      </h2>
+      {children ?? (
+        <h2 className="select-none text-[32px] font-normal leading-tight tracking-normal text-foreground">
+          {t("dispatch.homeTitle")}
+        </h2>
+      )}
       <Button
         type="button"
         variant="outline"

@@ -1,8 +1,15 @@
 import "@testing-library/jest-dom/vitest";
+import { configure } from "@testing-library/react";
 import { beforeAll, beforeEach } from "vitest";
 
 import i18n, { initializeI18n, loadAllLocaleResources } from "@/i18n";
 import { DISPATCH_DESK_STORAGE_KEY } from "@/lib/dispatch-desk";
+
+// A lazily imported surface (settings, thread shell) can take longer than the
+// 1s default to mount on a cold module graph, which made findBy*/waitFor give
+// up before the chunk arrived. 8s keeps the queries honest: a genuinely
+// missing element still fails, it just no longer fails on cold-start latency.
+configure({ asyncUtilTimeout: 8_000 });
 
 // The DOM test environment does not implement pointer capture used by Radix Select.
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -80,5 +87,11 @@ beforeEach(async () => {
   document.documentElement.lang = "en";
   document.title = "nanobot";
   localStorage.removeItem(DISPATCH_DESK_STORAGE_KEY);
+  // App restores the pre-restart route on the next visit to /new for five
+  // minutes (App.tsx RESTART_ROUTE_KEY/RESTART_STARTED_KEY). A test that
+  // exercises a restart would otherwise redirect every later test's /new
+  // navigation back to that chat, so reset the pair with the rest of the state.
+  localStorage.removeItem("nanobot-webui.restartRoute");
+  localStorage.removeItem("nanobot-webui.restartStartedAt");
   localStorage.setItem("nanobot.locale", "en");
 });

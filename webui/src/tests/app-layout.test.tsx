@@ -1101,7 +1101,8 @@ describe("App layout", () => {
     const projectSection = screen.getByRole("region", { name: "selected-project" });
     fireEvent.contextMenu(within(projectSection).getByRole("button", { name: "selected-project" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New topic" }));
-    expect(window.location.hash).toBe("#/new");
+    // The menu selection reaches the route asynchronously; assert the settled hash.
+    await waitFor(() => expect(window.location.hash).toBe("#/new"));
     // Let queued browser navigation events settle before sending the first message.
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(await screen.findByRole("button", { name: "Switch directory" })).toHaveTextContent("selected-project");
