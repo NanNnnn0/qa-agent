@@ -105,6 +105,13 @@ function SidebarActionMenuContent({
         className={ACTION_MENU_CONTENT_CLASS}
         portalContainer={portalContainer}
         onEscapeKeyDown={markEscape}
+        onFocusOutside={(event) => {
+          // The composer focuses its textarea when a thread mounts, and that
+          // programmatic focus lands outside the menu. Closing on it made a
+          // right-clicked menu disappear a frame after it opened; only a real
+          // pointer press, Escape, or a selection may dismiss the menu.
+          event.preventDefault();
+        }}
         onCloseAutoFocus={(event) => {
           // Actions can open a dialog or remove the trigger. Only Escape returns
           // to it; Radix still owns the trigger and outside-interaction handling.
